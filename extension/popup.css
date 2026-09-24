@@ -1,0 +1,6 @@
+body { font: 13px system-ui, sans-serif; margin: 16px; min-width: 240px; color: #18212b; }
+h1 { font-size: 16px; margin: 0 0 10px; }
+p { min-height: 34px; line-height: 1.35; }
+button { width: 100%; margin-top: 8px; padding: 9px; border: 0; border-radius: 6px; cursor: pointer; }
+#start { background: #1b6ef3; color: white; }
+#stop { background: #e7edf7; }
