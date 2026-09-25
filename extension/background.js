@@ -3,7 +3,7 @@ const LOCAL_RECEIVER = "http://127.0.0.1:8766";
 // Five is a practical batch size: it removes babysitting while avoiding the
 // bandwidth and memory failures that an unlimited number of players invites.
 const MAX_CONCURRENT_CAPTURES = 5;
-const MAX_CONCURRENT_DOWNLOADS = 10;
+const MAX_CONCURRENT_DOWNLOADS = 3;
 // A direct download can run in the background, but its signed stream must be
 // authorized in a real course tab. Keep that visibly disruptive step serial.
 const MAX_CONCURRENT_AUTHORIZATIONS = 1;
@@ -22,6 +22,7 @@ const startingLessons = new Set();
 let directDownloadQueue = [];
 let downloadStateLoaded = false;
 let queuePumpRunning = false;
+let badgeTimer = null;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -178,9 +179,97 @@ async function refreshAllDirectDownloads() {
       const state = await response.json();
       download.status = state.status;
       download.outputFile = state.outputFile;
+      download.title = state.title || download.title;
+      download.error = state.error || download.error;
+      download.phase = state.phase;
+      download.segmentsDone = state.segmentsDone ?? 0;
+      download.segmentsTotal = state.segmentsTotal ?? 0;
+      download.bytesDownloaded = state.bytesDownloaded ?? 0;
+      download.percent = state.percent ?? null;
+      if (state.status === "failed" && isAuthExpiredError(state.error) && (download.authRetries || 0) < 1 && download.sourceTabId) {
+        download.authRetries = (download.authRetries || 0) + 1;
+        await saveDownloadState();
+        retryExpiredDownload(download).catch(() => {});
+      }
     } catch { /* Keep the last known state until the collector is reachable again. */ }
   }));
   await saveDownloadState();
+}
+
+function isAuthExpiredError(message) {
+  const text = String(message || "");
+  return /401|403|denied or expired/i.test(text);
+}
+
+async function retryExpiredDownload(download) {
+  try {
+    const tab = await chrome.tabs.get(download.sourceTabId);
+    if (!tab?.id) return;
+    await startDirectDownload(tab.id);
+  } catch { /* User can click Capture again if the tab is gone. */ }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function progressLabel(download) {
+  if (download.status === "complete") return "Finished";
+  if (download.status === "cancelled") return "Stopped";
+  if (download.status === "failed") return download.error || "Failed";
+  if (download.phase === "cancelling") return "Stopping…";
+  if (download.percent != null && download.segmentsTotal > 0) {
+    return `${download.percent}% · ${download.segmentsDone}/${download.segmentsTotal} pieces · ${formatBytes(download.bytesDownloaded)}`;
+  }
+  if (download.phase === "remuxing" || download.phase === "joining" || download.phase === "verifying") {
+    return `Finishing (${download.phase})…`;
+  }
+  if (download.phase === "playlist") return "Reading playlist…";
+  return "Downloading…";
+}
+
+function recentJobStates() {
+  const jobs = [...directDownloads.values()];
+  const active = jobs.filter((download) => download.status === "downloading");
+  const recent = jobs
+    .filter((download) => download.status === "complete" || download.status === "failed" || download.status === "cancelled")
+    .slice(-8)
+    .reverse();
+  return [...active, ...recent];
+}
+
+async function updateActionBadge() {
+  try {
+    await refreshAllDirectDownloads();
+    const active = [...directDownloads.values()].filter((download) => download.status === "downloading");
+    if (!active.length) {
+      await chrome.action.setBadgeText({ text: "" });
+      return false;
+    }
+    const ranked = [...active].sort((a, b) => (b.percent ?? -1) - (a.percent ?? -1));
+    const top = ranked[0];
+    const text = top.percent != null ? `${top.percent}` : `${active.length}`;
+    await chrome.action.setBadgeBackgroundColor({ color: "#1b6ef3" });
+    await chrome.action.setBadgeText({ text: text.length > 3 ? `${active.length}` : text });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureBadgePolling() {
+  if (badgeTimer) return;
+  badgeTimer = setInterval(async () => {
+    const stillRunning = await updateActionBadge();
+    if (!stillRunning) {
+      clearInterval(badgeTimer);
+      badgeTimer = null;
+    }
+  }, 1000);
+  updateActionBadge().catch(() => {});
 }
 
 function isQueuedOrDownloading(lessonUrl) {
@@ -288,6 +377,7 @@ async function otherSiteCaptureKey(tab, video) {
 async function startOtherSiteDownload(tab) {
   const video = await currentOtherSiteVideo(tab.id, true);
   const captureKey = await otherSiteCaptureKey(tab, video);
+  const page = new URL(tab.url);
   if (startingDirectDownloads.has(captureKey)) return { active: true, status: "already queued" };
   startingDirectDownloads.add(captureKey);
   try {
@@ -297,7 +387,6 @@ async function startOtherSiteDownload(tab) {
     if (directDownloadStates().length >= MAX_CONCURRENT_DOWNLOADS)
       throw new Error(`All ${MAX_CONCURRENT_DOWNLOADS} download slots are busy. Try again when one finishes.`);
     await requireCollector();
-    const page = new URL(tab.url);
     const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: `${video.site} - ${video.title}`, lessonUrl: `${page.origin}${page.pathname}`,
@@ -305,12 +394,39 @@ async function startOtherSiteDownload(tab) {
         mediaUrl: video.mediaUrl }),
     }));
     const download = await response.json();
-    directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, status: download.status,
-      outputFile: download.outputFile });
+    directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: `${video.site} - ${video.title}`,
+      status: download.status, outputFile: download.outputFile, sourceTabId: tab.id, authRetries: 0 });
     authorizationFailures.delete(captureKey);
     await saveDownloadState();
+    ensureBadgePolling();
     return { active: true, status: download.status };
   } catch (error) {
+    if (isAuthExpiredError(error.message) && !startingDirectDownloads.has(`${captureKey}#retry`)) {
+      startingDirectDownloads.add(`${captureKey}#retry`);
+      try {
+        await delay(800);
+        const again = await currentOtherSiteVideo(tab.id, true);
+        const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: `${again.site} - ${again.title}`, lessonUrl: `${page.origin}${page.pathname}`,
+            referer: `${page.origin}/`, jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
+            mediaUrl: again.mediaUrl }),
+        }));
+        const download = await response.json();
+        directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: `${again.site} - ${again.title}`,
+          status: download.status, outputFile: download.outputFile, sourceTabId: tab.id, authRetries: 1 });
+        authorizationFailures.delete(captureKey);
+        await saveDownloadState();
+        ensureBadgePolling();
+        return { active: true, status: download.status };
+      } catch (retryError) {
+        authorizationFailures.set(captureKey, retryError.message || "The download could not start.");
+        await saveDownloadState();
+        throw retryError;
+      } finally {
+        startingDirectDownloads.delete(`${captureKey}#retry`);
+      }
+    }
     authorizationFailures.set(captureKey, error.message || "The download could not start.");
     await saveDownloadState();
     throw error;
@@ -339,10 +455,14 @@ async function submitCurrentVideoDownload(entry) {
     id: download.id,
     lessonUrl: entry.lessonUrl,
     videoKey: entry.videoId,
+    title: entry.title,
     status: download.status,
     outputFile: download.outputFile,
+    sourceTabId: entry.sourceTabId || null,
+    authRetries: entry.authRetries || 0,
   });
   await saveDownloadState();
+  ensureBadgePolling();
   pumpDirectDownloadQueue().catch(() => {});
 }
 
@@ -422,6 +542,7 @@ async function startDirectDownload(tabId) {
       title: source.title || "lesson",
       lessonUrl: captureKey,
       sourceLessonUrl: source.url,
+      sourceTabId: tabId,
       videoId: video.videoId,
       manifestUrl: video.manifestUrl,
       jobKey: attemptKey,
@@ -429,6 +550,7 @@ async function startDirectDownload(tabId) {
     });
     await saveDownloadState();
     await pumpDirectDownloadQueue();
+    ensureBadgePolling();
     return { active: true, status: "queued" };
   } finally {
     startingDirectDownloads.delete(captureKey);
@@ -471,7 +593,7 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
     const isQueued = directDownloadQueue.some((entry) => entry.lessonUrl === lessonUrl) ||
       authorizingDownloads.has(lessonUrl) || startingDirectDownloads.has(lessonUrl) ||
       [...downloadProbes.values()].some((probe) => probe.lessonUrl === lessonUrl);
-    if (isQueued) return { active: true, status: "queued" };
+    if (isQueued) return { active: true, status: "queued", progress: "Queued…" };
     const error = authorizationFailures.get(lessonUrl);
     return error ? { active: false, status: "failed", error } : { active: false };
   }
@@ -480,20 +602,99 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
     const state = await response.json();
     download.status = state.status;
     download.outputFile = state.outputFile;
+    download.title = state.title || download.title;
+    download.error = state.error || download.error;
+    download.phase = state.phase;
+    download.segmentsDone = state.segmentsDone ?? 0;
+    download.segmentsTotal = state.segmentsTotal ?? 0;
+    download.bytesDownloaded = state.bytesDownloaded ?? 0;
+    download.percent = state.percent ?? null;
     await saveDownloadState();
-    return { active: state.status === "downloading", status: state.status, outputFile: state.outputFile, error: state.error };
+    return {
+      active: state.status === "downloading",
+      status: state.status,
+      outputFile: state.outputFile,
+      error: state.error,
+      title: download.title,
+      id: download.id,
+      progress: progressLabel(download),
+      percent: download.percent,
+    };
   } catch (error) {
     // The collector keeps active jobs in memory. After Windows restarts it no
     // longer knows an old job id, but a completed lesson must still be allowed
     // to run again, especially if the user deleted its MP4.
     if (download.status === "complete") {
-      return { active: false, status: "complete", outputFile: download.outputFile };
+      return {
+        active: false, status: "complete", outputFile: download.outputFile,
+        title: download.title, id: download.id, progress: "Finished",
+      };
     }
     download.status = "failed";
     download.error = "The local collector no longer knows this download. Capture it again.";
     await saveDownloadState();
     return { active: false, status: "failed", error: download.error };
   }
+}
+
+async function revealDownload(id, outputFile) {
+  await requireCollector();
+  await requireOk(await fetch(`${LOCAL_RECEIVER}/reveal`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: id || "", outputFile: outputFile || "" }),
+  }));
+  return { ok: true };
+}
+
+async function cancelDirectDownload(id) {
+  await requireCollector();
+  await requireOk(await fetch(`${LOCAL_RECEIVER}/download/${id}/cancel`, { method: "POST" }));
+  const download = directDownloads.get(id);
+  if (download && download.status === "downloading") {
+    download.status = "cancelled";
+    download.error = "Stopped by user.";
+    download.phase = "cancelled";
+    await saveDownloadState();
+  }
+  return { ok: true, id };
+}
+
+async function cancelAllDirectDownloads() {
+  await loadDownloadState();
+  await requireCollector();
+  await requireOk(await fetch(`${LOCAL_RECEIVER}/download/cancel-all`, { method: "POST" }));
+  directDownloadQueue = [];
+  for (const download of directDownloads.values()) {
+    if (download.status === "downloading") {
+      download.status = "cancelled";
+      download.error = "Stopped by user.";
+      download.phase = "cancelled";
+    }
+  }
+  await saveDownloadState();
+  await updateActionBadge();
+  return { ok: true };
+}
+
+async function stopCurrentDirectDownload(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const video = isLessonTab(tab.url)
+    ? await currentVideoForTab(tab.id)
+    : await currentOtherSiteVideo(tab.id);
+  if (!video) return { active: false, error: "No video is displayed to stop." };
+  const captureKey = isLessonTab(tab.url)
+    ? `${tab.url}#video=${video.videoId}`
+    : await otherSiteCaptureKey(tab, video);
+  const download = latestDirectDownloadForLesson(captureKey);
+  if (!download || download.status !== "downloading") {
+    // Keep legacy segment-capture stop working if that path is active.
+    const capture = captures.get(tabId) || activeCaptureForLesson(tab.url);
+    if (capture) return stopCapture(capture.tabId);
+    return { active: false, error: "No active download for this video." };
+  }
+  await cancelDirectDownload(download.id);
+  return { active: false, status: "cancelled" };
 }
 
 async function saveSegment(capture, asset, body, base64Encoded) {
@@ -740,9 +941,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     startDirectDownload(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message })); return true;
   }
   if (message.type === "LESSON_CAPTURE_STOP") {
-    const capture = captures.get(message.tabId) || activeCaptureForLesson(message.lessonUrl);
-    if (!capture) { sendResponse({ active: false }); return; }
-    stopCapture(capture.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message })); return true;
+    stopCurrentDirectDownload(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.type === "LESSON_DIRECT_DOWNLOAD_CANCEL") {
+    cancelDirectDownload(message.id).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.type === "LESSON_DIRECT_DOWNLOAD_CANCEL_ALL") {
+    cancelAllDirectDownloads().then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+    return true;
   }
   if (message.type === "LESSON_CAPTURE_ENDED" && sender.tab?.id) {
     const tabId = sender.tab.id;
@@ -768,16 +976,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "LESSON_CAPTURE_JOBS") {
-    refreshAllDirectDownloads().then(() => sendResponse({ limit: MAX_CONCURRENT_DOWNLOADS, jobs: directDownloadStates(), queued: directDownloadQueue.length }));
+    refreshAllDirectDownloads().then(() => sendResponse({
+      limit: MAX_CONCURRENT_DOWNLOADS,
+      queued: directDownloadQueue.length,
+      jobs: recentJobStates().map((download) => ({
+        id: download.id,
+        title: download.title || "lesson",
+        status: download.status,
+        progress: progressLabel(download),
+        percent: download.percent ?? null,
+        outputFile: download.outputFile || null,
+        error: download.error || null,
+      })),
+    }));
+    return true;
+  }
+  if (message.type === "LESSON_REVEAL_DOWNLOAD") {
+    revealDownload(message.id, message.outputFile).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
     return true;
   }
 });
 
-chrome.runtime.onStartup.addListener(() => pumpDirectDownloadQueue().catch(() => {}));
+chrome.runtime.onStartup.addListener(() => {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  pumpDirectDownloadQueue().catch(() => {});
+});
 chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
   chrome.alarms.create("lesson-direct-download-queue", { periodInMinutes: 1 });
   pumpDirectDownloadQueue().catch(() => {});
 });
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "lesson-direct-download-queue") pumpDirectDownloadQueue().catch(() => {});
 });

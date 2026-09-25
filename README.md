@@ -4,13 +4,13 @@ Click **Capture this video** on the video currently displayed in Chrome. Finishe
 
 The existing Real World lesson-step flow is unchanged: capture one video, click Next, then capture the next video. On other sites, the extension inspects the clicked page and open shadow DOM for a direct HTTPS MP4 or HLS playlist. It uses the player's actual URL, including a short-lived authorization query when present. It does not invent a stream URL from a playback ID. Ten direct downloads can run at once; when all slots are busy, try again after one finishes.
 
-The local collector converts supported streams to MP4 and verifies that the result contains a video stream before reporting **Finished**. Failed, expired, inaccessible, or protected media is reported as a failure, not a completed capture. Direct download is the only mode; there is no screen-recording fallback. Some players or sites expose no accessible media URL and therefore cannot be captured this way.
+The local collector converts supported streams to MP4 and verifies that the result contains a video stream before reporting **Finished**. HLS lessons are fetched with parallel segment downloads at about **720p** (readable for local AI/agent use, not the top 1080p/4K rung), then remuxed locally; if a playlist cannot be parsed that way, the collector falls back to a sequential ffmpeg download. Failed, expired, inaccessible, or protected media is reported as a failure, not a completed capture. Direct download is the only mode; there is no screen-recording fallback. Some players or sites expose no accessible media URL and therefore cannot be captured this way.
 
 ## Setup
 
-1. Run `local-collector\build.ps1`, then `local-collector\install-collector.ps1` to build and install the local helper. Run the installer under the interactive Windows user's profile with permission to register its native host and sign-in entry.
+1. Run `local-collector\build.ps1`, then `local-collector\install-collector.ps1` to build and install the local helper. If the collector is already running, stop it first (or finish active captures) so the installer can replace the binary. Run the installer under the interactive Windows user's profile with permission to register its native host and sign-in entry.
 2. Open `chrome://extensions` and reload **Local Lesson Capture Helper** after updating the extension files.
-3. Open a video, click the extension icon, and choose **Capture this video**. You can keep using the tab while the local download runs.
+3. Open a video, click the extension icon, and choose **Capture this video**. While a download runs, the popup shows progress and a job list. After it finishes, use **Show in folder** to open the MP4 in Explorer. You can keep using the tab while the local download runs.
 
 The extension uses temporary access to the clicked page (`activeTab`). Its persistent job state contains the source page, a hash identifying the video, and the output path, never a signed media URL or token. The collector binds to `127.0.0.1` and does not upload captured media. Use it only for media you are authorized to save; do not redistribute course files.
 

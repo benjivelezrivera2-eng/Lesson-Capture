@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Local Lesson Capture Helper",
-  "version": "1.5.0",
+  "version": "1.7.4",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvSpr5j8oZR42FHfjrhqpQ8GqIP10I2lC8avp48Ot5NWU2hiKunFN6wi0QHaNiYaawWuDghyjNKFGrmTno4DyQ0Zbo2JEM9h5HeRo+EcdkHGZLBHIaEvGHolQ9L80rCo1YLis4cVHJXPkNePYHjWF4/goGgFWEsbxqjGZlhPZef5DEMKupdLkX9T827Q0lv20GkOR1rAMWvcywWEoxsXkB6vIswpyCzCE18kH52SqT0HEVfLwML24Ka74SeRt0maTbeUl4HXdVM6GpZAUN0PhA1/hCQKe0oCzUN4ogRIlUVbKCh2v3/0QvIFw9LqxJE3tfFRbjZwdROZWASq6L+pyUwIDAQAB",
   "description": "Captures authorized lesson audio and video locally for personal notes.",
-  "permissions": ["activeTab", "alarms", "debugger", "tabs", "storage", "notifications", "nativeMessaging", "scripting"],
+  "permissions": ["activeTab", "alarms", "debugger", "tabs", "storage", "notifications", "nativeMessaging", "scripting", "sidePanel"],
   "host_permissions": [
     "https://app.jointherealworld.com/*",
     "https://*.cloudflarestream.com/*",
-    "http://127.0.0.1:8766/*"
+    "http://127.0.0.1:8766/*",
+    "https://fonts.googleapis.com/*",
+    "https://fonts.gstatic.com/*"
   ],
   "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
@@ -18,5 +20,6 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_popup": "popup.html" }
+  "action": {},
+  "side_panel": { "default_path": "sidepanel.html" }
 }

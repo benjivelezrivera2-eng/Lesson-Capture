@@ -1,12 +1,25 @@
 <!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head>
-  <body>
-    <h1>Lesson Capture</h1>
+  <body data-theme="dark">
+    <header class="top">
+      <div>
+        <p class="eyebrow">Local archive</p>
+        <h1>Lesson Capture</h1>
+      </div>
+      <button type="button" id="theme" class="theme-toggle" aria-label="Switch theme">Light</button>
+    </header>
     <p id="status">Checking local processor…</p>
-    <button id="start">Capture in background</button>
-    <button id="stop" disabled>Stop and save</button>
-    <p id="jobs" aria-live="polite"></p>
+    <div id="progress" hidden>
+      <div id="bar"><div id="fill"></div></div>
+      <p id="progress-text"></p>
+    </div>
+    <button id="start">Capture this video</button>
+    <button id="reveal" hidden>Show in folder</button>
+    <button id="stop" disabled>Stop this download</button>
+    <button id="stop-all" disabled>Stop all</button>
+    <p id="summary" aria-live="polite"></p>
+    <ul id="jobs" aria-live="polite"></ul>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
