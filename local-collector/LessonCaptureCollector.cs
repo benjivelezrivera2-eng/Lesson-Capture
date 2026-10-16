@@ -24,6 +24,7 @@ public static class LessonCaptureCollector
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     private static readonly ConcurrentDictionary<string, CaptureSession> Sessions = new ConcurrentDictionary<string, CaptureSession>();
     private static readonly ConcurrentDictionary<string, DownloadSession> Downloads = new ConcurrentDictionary<string, DownloadSession>();
+    private static readonly object OutputNameLock = new object();
     private static readonly int Port = ResolvePort();
     private static readonly string CaptureRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -226,19 +227,23 @@ public static class LessonCaptureCollector
             }
         }
         var extension = kind == "audio" ? ".mp3" : ".mp4";
-        var output = Path.Combine(FinishedVideoRoot, OutputName(new CaptureSession { Id = id, Title = title, StartedAt = DateTime.UtcNow }, extension));
-        var download = new DownloadSession {
-            Id = id, Title = title, LessonUrl = lessonUrl, JobKey = jobKey, Kind = kind,
-            OutputFile = output, Status = "downloading", Phase = "starting",
-            ExpectedDurationSeconds = Number(payload, "expectedDurationSeconds")
-        };
-        Downloads[id] = download;
+        DownloadSession download;
+        lock (OutputNameLock)
+        {
+            var output = Path.Combine(FinishedVideoRoot, OutputName(new CaptureSession { Id = id, Title = title, StartedAt = DateTime.UtcNow }, extension));
+            download = new DownloadSession {
+                Id = id, Title = title, LessonUrl = lessonUrl, JobKey = jobKey, Kind = kind,
+                OutputFile = output, Status = "downloading", Phase = "starting",
+                ExpectedDurationSeconds = Number(payload, "expectedDurationSeconds")
+            };
+            Downloads[id] = download;
+        }
         if (kind == "audio")
             ThreadPool.QueueUserWorkItem(_ => DownloadAudio(download, mediaUrl, page.GetLeftPart(UriPartial.Authority) + "/"));
         else
             ThreadPool.QueueUserWorkItem(_ => DownloadManifest(download, mediaUrl, page.GetLeftPart(UriPartial.Authority) + "/"));
         // The signed manifest URL is intentionally never written to disk.
-        Respond(context, HttpStatusCode.Accepted, new { id = id, status = download.Status, outputFile = output });
+        Respond(context, HttpStatusCode.Accepted, new { id = id, status = download.Status, outputFile = download.OutputFile });
     }
 
     private static void GetDownload(HttpListenerContext context, string id)
@@ -1204,11 +1209,41 @@ public static class LessonCaptureCollector
 
     private static string OutputName(CaptureSession session, string extension)
     {
-        var id = SafeName(session.Id);
-        if (id.Length > 8) id = id.Substring(0, 8);
         var ext = string.IsNullOrWhiteSpace(extension) ? ".mp4" : extension;
         if (!ext.StartsWith(".")) ext = "." + ext;
-        return SafeName(session.Title) + " - " + session.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH-mm-ss") + " - " + id + ext;
+        var stem = SafeName(session.Title);
+        if (!Regex.IsMatch(stem, @"\d{4}-\d{2}-\d{2} \d{4}$"))
+        {
+            var stamp = session.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HHmm");
+            var room = Math.Max(1, 90 - (stamp.Length + 3));
+            if (stem.Length > room) stem = stem.Substring(0, room).Trim(' ', '.');
+            if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
+            stem = stem + " - " + stamp;
+        }
+        return UniqueOutputFile(stem, ext);
+    }
+
+    private static string UniqueOutputFile(string stem, string extension)
+    {
+        var plain = stem + extension;
+        if (!OutputNameTaken(plain)) return plain;
+        for (var n = 2; n < 1000; n++)
+        {
+            var name = stem + " (" + n + ")" + extension;
+            if (!OutputNameTaken(name)) return name;
+        }
+        return stem + " (" + DateTime.Now.ToString("HHmmss") + ")" + extension;
+    }
+
+    private static bool OutputNameTaken(string name)
+    {
+        var full = Path.Combine(FinishedVideoRoot, name);
+        if (File.Exists(full) || File.Exists(full + ".partial.mp4") || File.Exists(full + ".partial.mp3")) return true;
+        foreach (var download in Downloads.Values)
+        {
+            if (string.Equals(download.OutputFile, full, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private static void WriteMetadata(CaptureSession session, DateTime? completedAt, string packagingStatus = null, string outputFile = null, string packagingError = null)

@@ -332,6 +332,15 @@ async function currentOtherSiteVideo(tabId, required = false) {
           document.querySelector("h1")?.textContent ||
           document.querySelector("[data-testid*='lesson-title']")?.textContent ||
           document.title || "video").trim().slice(0, 140);
+        const ogTitle = (document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "").trim();
+        const siteName = (document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "").trim();
+        const h1 = (document.querySelector("h1")?.textContent || "").trim();
+        const channel = (
+          document.querySelector('[data-testid*="channel" i]')?.textContent ||
+          document.querySelector('nav [aria-current="page"]')?.textContent ||
+          ""
+        ).trim().replace(/^#/, "").slice(0, 80);
+        const site = location.hostname.replace(/^www\./, "");
         const supported = (value) => {
           try {
             const url = new URL(value, location.href);
@@ -346,12 +355,19 @@ async function currentOtherSiteVideo(tabId, required = false) {
           const rect = element.getBoundingClientRect();
           const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
           const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+          const duration = Number.isFinite(native?.duration) && native.duration > 0 ? native.duration : null;
           return { url: values.map(supported).find(Boolean), protected: Boolean(native?.mediaKeys),
-            visible: width * height, playing: Boolean(native && !native.paused) };
+            visible: width * height, playing: Boolean(native && !native.paused), duration };
         }).filter((item) => item.url || item.protected)
           .sort((a, b) => b.visible - a.visible || Number(b.playing) - Number(a.playing));
         return { mediaUrl: found[0]?.url || null, protected: found[0]?.protected || false,
-          title, site: location.hostname.replace(/^www\./, "") };
+          title, site, duration: found[0]?.duration ?? null,
+          naming: {
+            tabTitle: (document.title || "").trim(),
+            ogTitle, h1, siteName, channel,
+            lessonTitle: title,
+            site,
+          } };
       },
     });
     video = result;
@@ -405,14 +421,93 @@ function audioMimeForCollector(mediaUrl, mimeType = "") {
   return "audio/mpeg";
 }
 
-function pageAudioTitle(tab, audio) {
-  const channel = audio.channel || "";
-  const post = audio.title || tab.title || "audio";
-  const host = audio.site || (() => {
-    try { return new URL(tab.url).hostname.replace(/^www\./, ""); } catch { return "page"; }
-  })();
-  const parts = [channel || host, post].filter(Boolean);
-  return parts.join(" - ").slice(0, 160);
+function hostFromUrl(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "page"; }
+}
+
+function collapseSpace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function windowsSafe(value) {
+  return collapseSpace(String(value || "")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " "))
+    .replace(/[. ]+$/g, "")
+    .trim();
+}
+
+function genericSite(value) {
+  const text = collapseSpace(value).toLowerCase();
+  if (!text) return true;
+  if (/^(video|audio|lesson|untitled|untitled lesson|home|watch|player)$/.test(text)) return true;
+  if (/^audio \d+$/.test(text) || /^video \d+$/.test(text)) return true;
+  if (/^(the )?real world$/.test(text) || text === "join the real world" || text === "whop") return true;
+  return false;
+}
+
+function stripDecor(value) {
+  const text = windowsSafe(value).replace(/\s+[|\u2013\u2014-]\s+(the real world|join the real world|whop)$/i, "");
+  return windowsSafe(text).replace(/^#/, "");
+}
+
+function sameText(a, b) {
+  return collapseSpace(a).toLowerCase() === collapseSpace(b).toLowerCase();
+}
+
+function looksLikeHost(value, site) {
+  const text = collapseSpace(value).toLowerCase().replace(/^www\./, "");
+  const host = collapseSpace(site).toLowerCase().replace(/^www\./, "");
+  if (!text || !host) return false;
+  return text === host || text === host.split(".")[0];
+}
+
+function captureStamp(when) {
+  const date = when instanceof Date ? when : new Date();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day} ${hours}${minutes}`;
+}
+
+function clipName(value, max) {
+  const text = windowsSafe(value);
+  if (text.length <= max) return text;
+  return text.slice(0, max).replace(/[. ]+$/g, "").trim() || "lesson";
+}
+
+function captureNames(meta, when = new Date()) {
+  const source = meta || {};
+  const site = hostFromUrl(`https://${source.site || "page"}`);
+  const stamp = captureStamp(when);
+  const channel = stripDecor(source.channel);
+  const pageName = channel && !genericSite(channel) && !looksLikeHost(channel, site) ? channel : "";
+  const candidates = [source.lessonTitle, source.h1, source.ogTitle, source.tabTitle]
+    .map(stripDecor)
+    .filter((value) => value && !genericSite(value) && !looksLikeHost(value, site));
+  const title = (pageName
+    ? candidates.find((value) => !sameText(value, pageName))
+    : candidates[0]) || "";
+  const display = pageName && title ? `${pageName} - ${title}` : (title || pageName);
+  const fallback = windowsSafe(source.siteName) || site || "page";
+  const stem = display || fallback;
+  const stampPart = ` - ${stamp}`;
+  const fileStem = `${clipName(stem, 90 - stampPart.length)} - ${stamp}`;
+  return { display: display || fallback, fileStem };
+}
+
+function namesForMedia(tab, media) {
+  const naming = media?.naming || {};
+  return captureNames({
+    tabTitle: naming.tabTitle || tab?.title || "",
+    ogTitle: naming.ogTitle || "",
+    h1: naming.h1 || "",
+    siteName: naming.siteName || "",
+    channel: naming.channel || media?.channel || "",
+    lessonTitle: naming.lessonTitle || media?.title || "",
+    site: naming.site || media?.site || hostFromUrl(tab?.url),
+  });
 }
 
 // Inspect the clicked tab for media sources. Signed URLs are passed only in
@@ -501,6 +596,9 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         document.title ||
         "audio"
       ).trim().slice(0, 140);
+      const ogTitle = (document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "").trim();
+      const siteName = (document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "").trim();
+      const h1 = (document.querySelector("h1")?.textContent || "").trim();
 
       let elements = collectMedia();
       // warm runs at most once per Capture when no HTTPS URL was found yet.
@@ -616,6 +714,15 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         title: preferred?.label || pageTitle,
         channel,
         site: location.hostname.replace(/^www\./, ""),
+        naming: {
+          tabTitle: (document.title || "").trim(),
+          ogTitle,
+          h1,
+          siteName,
+          channel,
+          lessonTitle: preferred?.label || pageTitle,
+          site: location.hostname.replace(/^www\./, ""),
+        },
         protected: preferred?.protected || false,
         hasBlobPlayer: candidates.some((item) => item.blob),
         mediaCount: elements.length,
@@ -754,7 +861,8 @@ async function audioCaptureKey(tab, audio) {
 
 async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
   const page = new URL(tab.url);
-  const title = pageAudioTitle(tab, audio);
+  const names = namesForMedia(tab, audio);
+  const title = names.fileStem;
   const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -773,6 +881,8 @@ async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
     id: download.id,
     lessonUrl: captureKey,
     title,
+    displayTitle: names.display,
+    durationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
     kind: "audio",
     status: download.status,
     outputFile: download.outputFile,
@@ -865,14 +975,17 @@ async function startOtherSiteDownload(tab) {
     if (directDownloadStates().length >= MAX_CONCURRENT_DOWNLOADS)
       throw new Error(`All ${MAX_CONCURRENT_DOWNLOADS} download slots are busy. Try again when one finishes.`);
     await requireCollector();
+    const names = namesForMedia(tab, video);
     const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: `${video.site} - ${video.title}`, lessonUrl: `${page.origin}${page.pathname}`,
+      body: JSON.stringify({ title: names.fileStem, lessonUrl: `${page.origin}${page.pathname}`,
         referer: `${page.origin}/`, jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
         mediaUrl: video.mediaUrl }),
     }));
     const download = await response.json();
-    directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: `${video.site} - ${video.title}`,
+    directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: names.fileStem,
+      displayTitle: names.display, durationSeconds: Number.isFinite(video.duration) ? video.duration : null,
+      kind: "video",
       status: download.status, outputFile: download.outputFile, sourceTabId: tab.id, authRetries: 0 });
     authorizationFailures.delete(captureKey);
     await saveDownloadState();
@@ -884,14 +997,17 @@ async function startOtherSiteDownload(tab) {
       try {
         await delay(800);
         const again = await currentOtherSiteVideo(tab.id, true);
+        const retryNames = namesForMedia(tab, again);
         const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: `${again.site} - ${again.title}`, lessonUrl: `${page.origin}${page.pathname}`,
+          body: JSON.stringify({ title: retryNames.fileStem, lessonUrl: `${page.origin}${page.pathname}`,
             referer: `${page.origin}/`, jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
             mediaUrl: again.mediaUrl }),
         }));
         const download = await response.json();
-        directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: `${again.site} - ${again.title}`,
+        directDownloads.set(download.id, { id: download.id, lessonUrl: captureKey, title: retryNames.fileStem,
+          displayTitle: retryNames.display, durationSeconds: Number.isFinite(again.duration) ? again.duration : null,
+          kind: "video",
           status: download.status, outputFile: download.outputFile, sourceTabId: tab.id, authRetries: 1 });
         authorizationFailures.delete(captureKey);
         await saveDownloadState();
@@ -934,6 +1050,9 @@ async function submitCurrentVideoDownload(entry) {
     lessonUrl: entry.lessonUrl,
     videoKey: entry.videoId,
     title: entry.title,
+    displayTitle: entry.displayTitle || entry.title,
+    durationSeconds: entry.durationSeconds ?? null,
+    kind: entry.kind === "audio" ? "audio" : "video",
     status: download.status,
     outputFile: download.outputFile,
     sourceTabId: entry.sourceTabId || null,
@@ -947,7 +1066,11 @@ async function submitCurrentVideoDownload(entry) {
 async function launchDirectDownloadProbe(entry) {
   await requireCollector();
   const isolated = await chrome.tabs.create({ url: "about:blank", active: false });
-  const probe = { tabId: isolated.id, title: entry.title || "lesson", lessonUrl: entry.lessonUrl, manifests: new Map() };
+  const probe = {
+    tabId: isolated.id, title: entry.title || "lesson", lessonUrl: entry.lessonUrl, manifests: new Map(),
+    displayTitle: entry.displayTitle || entry.title || "lesson",
+    durationSeconds: entry.durationSeconds ?? null,
+  };
   downloadProbes.set(isolated.id, probe);
   try {
     await chrome.debugger.attach({ tabId: isolated.id }, "1.3");
@@ -1003,6 +1126,43 @@ async function pumpDirectDownloadQueue() {
   }
 }
 
+async function readPageNaming(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const text = (value) => String(value || "").replace(/\s+/g, " ").trim();
+        const player = [...document.querySelectorAll("video")].reverse()
+          .find((node) => /^[a-f0-9]{32}$/i.test(node.id));
+        const near = player?.closest("article, section, main, div")
+          ?.querySelector("h1, h2, [data-testid*='title' i]")?.textContent;
+        return {
+          tabTitle: text(document.title),
+          ogTitle: text(document.querySelector('meta[property="og:title"]')?.getAttribute("content")),
+          h1: text(document.querySelector("h1")?.textContent),
+          siteName: text(document.querySelector('meta[property="og:site_name"]')?.getAttribute("content")),
+          channel: text(
+            document.querySelector('[data-testid*="channel" i]')?.textContent ||
+            document.querySelector("nav [aria-current='page']")?.textContent ||
+            ""
+          ).replace(/^#/, ""),
+          lessonTitle: text(
+            document.querySelector("mux-player[title]")?.getAttribute("title") ||
+            document.querySelector("[data-testid*='lesson-title']")?.textContent ||
+            near ||
+            document.querySelector("h1")?.textContent
+          ),
+          site: location.hostname.replace(/^www\./, ""),
+          duration: player && Number.isFinite(player.duration) && player.duration > 0 ? player.duration : null,
+        };
+      },
+    });
+    return result || {};
+  } catch {
+    return {};
+  }
+}
+
 async function startDirectDownload(tabId) {
   const source = await chrome.tabs.get(tabId);
   if (!isLessonTab(source.url)) return startOtherSiteDownload(source);
@@ -1016,8 +1176,21 @@ async function startDirectDownload(tabId) {
     await refreshAllDirectDownloads();
     if (isQueuedOrDownloading(captureKey)) return { active: true, status: "already queued" };
     authorizationFailures.delete(captureKey);
+    const naming = await readPageNaming(tabId);
+    const names = captureNames({
+      tabTitle: naming.tabTitle || source.title || "",
+      ogTitle: naming.ogTitle || "",
+      h1: naming.h1 || "",
+      siteName: naming.siteName || "",
+      channel: naming.channel || "",
+      lessonTitle: naming.lessonTitle || "",
+      site: naming.site || hostFromUrl(source.url),
+    });
     directDownloadQueue.push({
-      title: source.title || "lesson",
+      title: names.fileStem,
+      displayTitle: names.display,
+      durationSeconds: naming.duration ?? null,
+      kind: "video",
       lessonUrl: captureKey,
       sourceLessonUrl: source.url,
       sourceTabId: tabId,
@@ -1043,7 +1216,11 @@ async function submitDirectDownload(probe, manifestUrl, videoNumber = 1, videoCo
     body: JSON.stringify({ title, lessonUrl: probe.lessonUrl, jobKey: `${probe.lessonUrl}#video=${videoKey}`, manifestUrl })
   }));
   const download = await response.json();
-  directDownloads.set(download.id, { id: download.id, lessonUrl: probe.lessonUrl, videoKey, status: download.status, outputFile: download.outputFile });
+  directDownloads.set(download.id, {
+    id: download.id, lessonUrl: probe.lessonUrl, videoKey, title, status: download.status,
+    displayTitle: probe.displayTitle || title, durationSeconds: probe.durationSeconds ?? null, kind: "video",
+    outputFile: download.outputFile,
+  });
   await saveDownloadState();
   downloadProbes.delete(probe.tabId);
   chrome.debugger.detach({ tabId: probe.tabId }).catch(() => {});
@@ -1071,7 +1248,16 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
     const isQueued = directDownloadQueue.some((entry) => entry.lessonUrl === lessonUrl) ||
       authorizingDownloads.has(lessonUrl) || startingDirectDownloads.has(lessonUrl) ||
       [...downloadProbes.values()].some((probe) => probe.lessonUrl === lessonUrl);
-    if (isQueued) return { active: true, status: "queued", progress: "Queued…" };
+    if (isQueued) {
+      const entry = directDownloadQueue.find((item) => item.lessonUrl === lessonUrl);
+      return {
+        active: true, status: "queued", progress: "Waiting to start",
+        title: entry?.title || null,
+        displayTitle: entry?.displayTitle || entry?.title || null,
+        durationSeconds: entry?.durationSeconds ?? null,
+        kind: entry?.kind === "audio" ? "audio" : "video",
+      };
+    }
     const error = authorizationFailures.get(lessonUrl);
     return error ? { active: false, status: "failed", error } : { active: false };
   }
@@ -1096,6 +1282,11 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
       error: state.error,
       note: download.note,
       title: download.title,
+      displayTitle: download.displayTitle || download.title,
+      durationSeconds: download.durationSeconds ?? null,
+      segmentsDone: download.segmentsDone ?? 0,
+      segmentsTotal: download.segmentsTotal ?? 0,
+      kind: download.kind === "audio" ? "audio" : "video",
       id: download.id,
       progress: progressLabel(download),
       percent: download.percent,
@@ -1107,7 +1298,10 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
     if (download.status === "complete") {
       return {
         active: false, status: "complete", outputFile: download.outputFile,
-        title: download.title, id: download.id, progress: "Finished",
+        title: download.title, displayTitle: download.displayTitle || download.title,
+        durationSeconds: download.durationSeconds ?? null,
+        kind: download.kind === "audio" ? "audio" : "video",
+        id: download.id, progress: "Finished",
       };
     }
     download.status = "failed";
@@ -1490,6 +1684,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       jobs: recentJobStates().map((download) => ({
         id: download.id,
         title: download.title || "lesson",
+        displayTitle: download.displayTitle || download.title || "lesson",
+        kind: download.kind === "audio" ? "audio" : "video",
+        durationSeconds: download.durationSeconds ?? null,
+        segmentsDone: download.segmentsDone ?? 0,
+        segmentsTotal: download.segmentsTotal ?? 0,
         status: download.status,
         progress: progressLabel(download),
         percent: download.percent ?? null,
