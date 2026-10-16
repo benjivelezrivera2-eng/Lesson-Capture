@@ -2,10 +2,9 @@ const status = document.querySelector("#status");
 const start = document.querySelector("#start");
 const stop = document.querySelector("#stop");
 const stopAll = document.querySelector("#stop-all");
-const reveal = document.querySelector("#reveal");
 const summary = document.querySelector("#summary");
-const jobs = document.querySelector("#jobs");
-const progress = document.querySelector("#progress");
+const running = document.querySelector("#running");
+const progressTitle = document.querySelector("#progress-title");
 const fill = document.querySelector("#fill");
 const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
@@ -13,23 +12,25 @@ const modeAudio = document.querySelector("#mode-audio");
 const modeVideo = document.querySelector("#mode-video");
 const audioPickWrap = document.querySelector("#audio-pick-wrap");
 const audioPick = document.querySelector("#audio-pick");
+const historyLabel = document.querySelector("#history-label");
+const historyCount = document.querySelector("#history-count");
+const historyEmpty = document.querySelector("#history-empty");
+const historyList = document.querySelector("#history");
+const clearHistory = document.querySelector("#clear-history");
 const THEME_KEY = "lessonCaptureTheme";
 const MODE_KEY = "lessonCaptureMode";
+const HISTORY_KEY = { audio: "lessonCaptureHistoryAudio", video: "lessonCaptureHistoryVideo" };
+const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.4 1.75h8a1.75 1.75 0 0 1 1.75 1.75v8.75A1.75 1.75 0 0 1 18.75 19H5.25A1.75 1.75 0 0 1 3.5 17.25V6.75Z"/></svg>`;
 
-let revealTarget = null;
 let captureMode = "video";
 let audioCandidates = [];
 let lastAudioListAt = 0;
+let shownJobId = null;
+let historyWrite = Promise.resolve();
 
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
-}
-
-function shortPath(path) {
-  if (!path) return "";
-  const parts = String(path).split(/[/\\]/);
-  return parts[parts.length - 1] || path;
 }
 
 function applyTheme(theme) {
@@ -73,19 +74,6 @@ async function setMode(mode) {
   await refresh();
 }
 
-function setProgress(visible, percent, label) {
-  progress.hidden = !visible;
-  if (!visible) {
-    fill.style.width = "0%";
-    progressText.textContent = "";
-    return;
-  }
-  const width = percent == null ? 15 : Math.max(2, Math.min(100, percent));
-  fill.style.width = `${width}%`;
-  fill.style.opacity = percent == null ? "0.55" : "1";
-  progressText.textContent = label || "";
-}
-
 function startLabel(state) {
   if (captureMode === "audio") {
     return state.status === "complete" ? "Capture this audio again" : "Capture this audio";
@@ -96,12 +84,59 @@ function startLabel(state) {
 function formatDuration(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value) || value <= 0) return "";
-  const total = Math.round(value);
+  return clock(value);
+}
+
+function clock(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const secs = total % 60;
   if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function savedWhen(ms) {
+  const date = new Date(ms);
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  const day = date.toLocaleDateString([], { month: "short", day: "numeric" });
+  return `${day}, ${time}`;
+}
+
+function readableTitle(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const stripped = text.replace(/\s+-\s+\d{4}-\d{2}-\d{2}\s+\d{4}(?:\s+\(\d+\))?$/, "");
+  return stripped || text || "Lesson";
+}
+
+function historyMeta(item) {
+  const when = `saved ${savedWhen(item.savedAt)}`;
+  const length = formatDuration(item.durationSeconds);
+  return length ? `${length}, ${when}` : when;
+}
+
+function detailFor(source) {
+  if (!source) return "Downloading";
+  if (source.status === "queued") return "Waiting to start";
+  const total = Number(source.durationSeconds);
+  const percent = source.percent;
+  if (Number.isFinite(total) && total > 0 && percent != null) {
+    const elapsed = Math.min(total, Math.max(0, total * (Number(percent) / 100)));
+    return `${clock(elapsed)} of ${clock(total)}`;
+  }
+  if (Number(source.segmentsTotal) > 0) return `${source.segmentsDone || 0} of ${source.segmentsTotal}`;
+  return "Downloading";
+}
+
+function setBar(percent, waiting) {
+  if (waiting || percent == null) {
+    fill.style.width = "15%";
+    fill.style.opacity = "0.55";
+    return;
+  }
+  fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+  fill.style.opacity = "1";
 }
 
 function renderAudioPick(candidates, selectedId) {
@@ -147,6 +182,79 @@ async function refreshAudioCandidates(force = false) {
   }
 }
 
+async function loadHistory(mode) {
+  const key = HISTORY_KEY[mode];
+  const stored = await chrome.storage.local.get({ [key]: [] });
+  return Array.isArray(stored[key]) ? stored[key] : [];
+}
+
+function rememberCompleted(jobs) {
+  const done = (jobs || []).filter((job) => job.status === "complete" && job.id && job.outputFile);
+  if (!done.length) return historyWrite;
+  historyWrite = historyWrite.then(() => writeHistory(done)).catch(() => {});
+  return historyWrite;
+}
+
+async function writeHistory(done) {
+  const grouped = { audio: [], video: [] };
+  for (const job of done) grouped[job.kind === "audio" ? "audio" : "video"].push(job);
+  for (const mode of ["audio", "video"]) {
+    if (!grouped[mode].length) continue;
+    const key = HISTORY_KEY[mode];
+    const stored = await chrome.storage.local.get({ [key]: [] });
+    const list = Array.isArray(stored[key]) ? stored[key] : [];
+    let changed = false;
+    for (const job of grouped[mode]) {
+      if (list.some((item) => item.id === job.id)) continue;
+      list.unshift({
+        id: job.id,
+        title: readableTitle(job.displayTitle || job.title),
+        durationSeconds: Number.isFinite(Number(job.durationSeconds)) ? Number(job.durationSeconds) : null,
+        savedAt: Date.now(),
+        outputFile: job.outputFile,
+      });
+      changed = true;
+    }
+    if (changed) await chrome.storage.local.set({ [key]: list.slice(0, 100) });
+  }
+}
+
+function renderHistory(items) {
+  const modeName = captureMode === "audio" ? "audio" : "video";
+  historyLabel.textContent = captureMode === "audio" ? "Audio" : "Video";
+  historyCount.textContent = String(items.length);
+  historyList.replaceChildren();
+  const empty = items.length === 0;
+  historyEmpty.hidden = !empty;
+  historyEmpty.textContent = `No ${modeName} captures yet.`;
+  historyList.hidden = empty;
+  clearHistory.hidden = empty;
+  for (const item of items) {
+    const row = document.createElement("li");
+    const copy = document.createElement("div");
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = item.title || "Lesson";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = historyMeta(item);
+    copy.append(title, meta);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "folder";
+    open.setAttribute("aria-label", "Show in folder");
+    open.innerHTML = FOLDER_ICON;
+    open.addEventListener("click", async () => {
+      const result = await chrome.runtime.sendMessage({
+        type: "LESSON_REVEAL_DOWNLOAD", id: item.id, outputFile: item.outputFile,
+      });
+      if (result?.error) status.textContent = `Could not open folder: ${result.error}`;
+    });
+    row.append(copy, open);
+    historyList.append(row);
+  }
+}
+
 async function refresh() {
   const tab = await activeTab();
   const [state, queue] = await Promise.all([
@@ -156,98 +264,51 @@ async function refresh() {
     }),
     chrome.runtime.sendMessage({ type: "LESSON_CAPTURE_JOBS" }),
   ]);
-  start.disabled = state.active;
-  start.textContent = startLabel(state);
-  if (stop) stop.disabled = !state.active;
+  const jobs = queue?.jobs || [];
+  await rememberCompleted(jobs);
 
+  start.disabled = Boolean(state.active);
+  start.textContent = startLabel(state);
+  const title = readableTitle(state.displayTitle || state.title);
   if (state.error) {
     status.textContent = `Download failed or unsupported: ${state.error}`;
-    setProgress(false);
   } else if (state.active) {
     status.textContent = captureMode === "audio"
       ? "Downloading this audio. You can keep using the tab while it finishes."
       : "Downloading this displayed video. You can click Next and capture the next one.";
-    setProgress(true, state.percent, state.progress || "Downloading…");
   } else if (state.status === "complete") {
-    const note = state.note ? ` ${state.note}` : "";
-    status.textContent = `Finished: ${shortPath(state.outputFile)}.${note}`;
-    setProgress(true, 100, state.note || "Finished");
+    const note = state.note && !/[\\/]/.test(state.note) ? ` ${state.note}` : "";
+    status.textContent = `Saved ${title}.${note}`;
   } else if (state.status === "cancelled") {
     status.textContent = captureMode === "audio"
       ? "Stopped. Capture again when you want this audio."
       : "Stopped. Capture again when you want this video.";
-    setProgress(false);
   } else {
     status.textContent = captureMode === "audio"
       ? "Ready. This captures the audio on the page without playing it through."
       : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
-    setProgress(false);
   }
 
-  revealTarget = state.status === "complete" && state.outputFile
-    ? { id: state.id, outputFile: state.outputFile }
-    : null;
-  reveal.hidden = !revealTarget;
-
-  const running = (queue.jobs || []).filter((job) => job.status === "downloading").length;
-  if (stopAll) stopAll.disabled = running === 0;
-  summary.textContent = `${running}/${queue.limit ?? 10} running, ${queue.queued ?? 0} waiting`;
-
-  jobs.replaceChildren();
-  for (const job of queue.jobs || []) {
-    const item = document.createElement("li");
-    const title = document.createElement("span");
-    title.className = "title";
-    title.textContent = job.title || "lesson";
-    const meta = document.createElement("div");
-    meta.className = `meta ${
-      job.status === "failed" ? "failed"
-        : job.status === "cancelled" ? "failed"
-          : job.status === "complete" ? "complete" : ""
-    }`;
-    meta.textContent = job.status === "failed"
-      ? (job.error || "Failed")
-      : job.note
-        ? `${job.progress || job.status} · ${job.note}`
-        : job.progress || job.status;
-    item.append(title, meta);
-    if (job.status === "downloading") {
-      const bar = document.createElement("div");
-      bar.className = "job-bar";
-      const jobFill = document.createElement("div");
-      jobFill.className = "job-fill";
-      jobFill.style.width = `${job.percent == null ? 15 : Math.max(2, Math.min(100, job.percent))}%`;
-      jobFill.style.opacity = job.percent == null ? "0.55" : "1";
-      bar.append(jobFill);
-      item.append(bar);
-      const stopOne = document.createElement("button");
-      stopOne.type = "button";
-      stopOne.textContent = "Stop";
-      stopOne.addEventListener("click", async () => {
-        stopOne.disabled = true;
-        const result = await chrome.runtime.sendMessage({
-          type: "LESSON_DIRECT_DOWNLOAD_CANCEL", id: job.id,
-        });
-        if (result?.error) status.textContent = `Could not stop: ${result.error}`;
-        await refresh();
-      });
-      item.append(stopOne);
-    }
-    if (job.status === "complete" && job.outputFile) {
-      const open = document.createElement("button");
-      open.type = "button";
-      open.textContent = "Show in folder";
-      open.addEventListener("click", async () => {
-        const result = await chrome.runtime.sendMessage({
-          type: "LESSON_REVEAL_DOWNLOAD", id: job.id, outputFile: job.outputFile,
-        });
-        if (result?.error) status.textContent = `Could not open folder: ${result.error}`;
-      });
-      item.append(open);
-    }
-    jobs.append(item);
+  const runningJobs = jobs.filter((job) => job.status === "downloading");
+  const active = Boolean(state.active) || runningJobs.length > 0;
+  running.hidden = !active;
+  if (active) {
+    const card = runningJobs.find((job) => job.id && job.id === state.id) || runningJobs[0] || state;
+    shownJobId = card?.id || state.id || null;
+    progressTitle.textContent = readableTitle(card.displayTitle || card.title || state.displayTitle || state.title);
+    const waiting = card.status === "queued" || state.status === "queued";
+    setBar(card.percent ?? state.percent, waiting && card.percent == null);
+    progressText.textContent = detailFor(card.status ? card : state);
+    const waitingCount = queue?.queued ?? 0;
+    summary.textContent = waitingCount > 0
+      ? `${runningJobs.length} running, ${waitingCount} waiting`
+      : `${runningJobs.length} running`;
+  } else {
+    shownJobId = null;
+    summary.textContent = "";
   }
 
+  renderHistory(await loadHistory(captureMode));
   await refreshAudioCandidates();
 }
 
@@ -266,19 +327,9 @@ start.addEventListener("click", async () => {
     return;
   }
   status.textContent = captureMode === "audio"
-    ? "Audio queued. A file appears in Lesson Captures while it downloads."
-    : "Current video queued. A .partial.mp4 appears in Lesson Captures while it downloads.";
+    ? "Audio queued. You can keep using the tab while it downloads."
+    : "Video queued. You can keep using the tab while it downloads.";
   await refresh();
-});
-
-reveal.addEventListener("click", async () => {
-  if (!revealTarget) return;
-  const result = await chrome.runtime.sendMessage({
-    type: "LESSON_REVEAL_DOWNLOAD",
-    id: revealTarget.id,
-    outputFile: revealTarget.outputFile,
-  });
-  if (result?.error) status.textContent = `Could not open folder: ${result.error}`;
 });
 
 stop?.addEventListener("click", async () => {
@@ -288,7 +339,14 @@ stop?.addEventListener("click", async () => {
     tabId: tab.id,
     lessonUrl: tab.url,
   });
-  status.textContent = result.error || "Stopped this download.";
+  if (result?.error && shownJobId) {
+    const fallback = await chrome.runtime.sendMessage({
+      type: "LESSON_DIRECT_DOWNLOAD_CANCEL", id: shownJobId,
+    });
+    status.textContent = fallback?.error || "Stopped this download.";
+  } else {
+    status.textContent = result.error || "Stopped this download.";
+  }
   await refresh();
 });
 
@@ -296,6 +354,14 @@ stopAll?.addEventListener("click", async () => {
   stopAll.disabled = true;
   const result = await chrome.runtime.sendMessage({ type: "LESSON_DIRECT_DOWNLOAD_CANCEL_ALL" });
   status.textContent = result.error || "Stopped all downloads.";
+  await refresh();
+});
+
+clearHistory?.addEventListener("click", async () => {
+  const modeName = captureMode === "audio" ? "audio" : "video";
+  const ok = confirm(`Clear ${modeName} history? This only empties the list. Your saved files stay in the folder.`);
+  if (!ok) return;
+  await chrome.storage.local.set({ [HISTORY_KEY[captureMode]]: [] });
   await refresh();
 });
 
@@ -308,4 +374,4 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 Promise.all([loadTheme(), loadMode()]).then(refresh).catch(refresh);
-setInterval(refresh, 1000);
+setInterval(() => { refresh().catch(() => {}); }, 1000);
