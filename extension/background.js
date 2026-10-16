@@ -377,6 +377,8 @@ async function otherSiteCaptureKey(tab, video) {
 }
 
 const AUDIO_PATH_RE = /\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)(?:$|\?)/i;
+const AUDIO_MIME_RE = /^audio\//i;
+const audioNetworkProbes = new Map();
 
 function isAudioMediaUrl(value) {
   try {
@@ -384,11 +386,15 @@ function isAudioMediaUrl(value) {
     if (url.protocol !== "https:") return false;
     const path = url.pathname.toLowerCase();
     if (AUDIO_PATH_RE.test(path)) return true;
-    // Some CDNs put the extension only in a query parameter.
     return AUDIO_PATH_RE.test(url.search);
   } catch {
     return false;
   }
+}
+
+function isLikelyAudioNetworkUrl(url, mimeType = "") {
+  if (AUDIO_MIME_RE.test(mimeType || "")) return true;
+  return isAudioMediaUrl(url);
 }
 
 function pageAudioTitle(tab, audio) {
@@ -401,15 +407,16 @@ function pageAudioTitle(tab, audio) {
   return parts.join(" - ").slice(0, 160);
 }
 
-// Inspect the clicked tab for <audio> sources. Signed URLs are passed only in
+// Inspect the clicked tab for media sources. Signed URLs are passed only in
 // the download request body and never written to persisted extension state.
+// warm=true may briefly play a paused player once; never call it from the 1s poll.
 async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     args: [{ warm: Boolean(warm), audioId }],
     func: async (options) => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const audioUrl = (value) => {
+      const strictAudioUrl = (value) => {
         try {
           const url = new URL(value, location.href);
           if (url.protocol !== "https:") return null;
@@ -419,12 +426,30 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
           return null;
         } catch { return null; }
       };
-      const collectElements = () => {
+      // Call-archive players often use extensionless CDN paths or <video> tags.
+      const looseMediaUrl = (value, preferAudio) => {
+        const strict = strictAudioUrl(value);
+        if (strict) return strict;
+        try {
+          const url = new URL(value, location.href);
+          if (url.protocol !== "https:") return null;
+          if (preferAudio) return url.href;
+          return null;
+        } catch { return null; }
+      };
+      const collectMedia = () => {
         const found = [];
         const visit = (root) => {
           for (const element of root.querySelectorAll("*")) {
             if (element instanceof HTMLAudioElement) found.push(element);
-            else if (element.shadowRoot) visit(element.shadowRoot);
+            else if (element instanceof HTMLVideoElement) {
+              // Audio posts sometimes render in a video element with no picture.
+              const audioLike = !element.videoWidth || element.videoWidth < 16 ||
+                element.getAttribute("audio") != null ||
+                /audio/i.test(element.getAttribute("aria-label") || "") ||
+                /\.mp3|\.m4a|audio/i.test(element.currentSrc || element.src || "");
+              if (audioLike) found.push(element);
+            } else if (element.shadowRoot) visit(element.shadowRoot);
           }
         };
         visit(document);
@@ -433,58 +458,82 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
       const resourceUrls = () => {
         try {
           return performance.getEntriesByType("resource")
-            .map((entry) => audioUrl(entry.name))
+            .map((entry) => {
+              const strict = strictAudioUrl(entry.name);
+              if (strict) return strict;
+              // Blob players still fetch an HTTPS file first; keep that request.
+              if (/mp3|m4a|mpeg|audio\/|\/audio\b/i.test(entry.name)) {
+                return looseMediaUrl(entry.name, true);
+              }
+              if ((entry.initiatorType === "audio" || entry.initiatorType === "video") &&
+                String(entry.name).startsWith("https://")) {
+                return entry.name;
+              }
+              return null;
+            })
             .filter(Boolean);
         } catch { return []; }
       };
+      const anchorUrls = () => [...document.querySelectorAll("a[href]")]
+        .map((anchor) => strictAudioUrl(anchor.href))
+        .filter(Boolean);
       const channel = (
         document.querySelector('[data-testid*="channel" i]')?.textContent ||
         document.querySelector('nav [aria-current="page"]')?.textContent ||
-        [...document.querySelectorAll("a, h1, h2, span")]
+        [...document.querySelectorAll("a, h1, h2, span, button")]
           .map((node) => (node.textContent || "").trim())
           .find((text) => /^#[\w-]+$/.test(text)) ||
         ""
       ).trim().replace(/^#/, "").slice(0, 80);
       const pageTitle = (
+        document.querySelector('[class*="player" i] [class*="title" i]')?.textContent ||
         document.querySelector("h1")?.textContent ||
         document.querySelector("[data-testid*='title' i]")?.textContent ||
         document.title ||
         "audio"
       ).trim().slice(0, 140);
 
-      let elements = collectElements();
+      let elements = collectMedia();
       if (options.warm && elements.length) {
         const target = options.audioId
           ? elements.find((el, index) => `audio-${index}` === options.audioId) || elements[0]
-          : (window.__lessonCaptureLastAudio instanceof HTMLAudioElement
+          : (window.__lessonCaptureLastAudio instanceof HTMLMediaElement
             ? window.__lessonCaptureLastAudio
             : elements.find((el) => !el.paused) || elements[0]);
         if (target) {
-          const wasMuted = target.muted;
-          target.muted = true;
-          try {
-            if (target.readyState < HTMLMediaElement.HAVE_METADATA) {
-              await Promise.race([
-                new Promise((resolve) => target.addEventListener("loadedmetadata", resolve, { once: true })),
-                delay(1500),
-              ]);
-            }
-            await target.play();
-            await delay(900);
-            target.pause();
-          } catch { /* URL may already be present without play */ }
-          target.muted = wasMuted;
-          elements = collectElements();
+          // If the user is already playing, only read the URL. Do not pause.
+          if (target.paused) {
+            const wasMuted = target.muted;
+            target.muted = true;
+            try {
+              if (target.readyState < HTMLMediaElement.HAVE_METADATA) {
+                await Promise.race([
+                  new Promise((resolve) => target.addEventListener("loadedmetadata", resolve, { once: true })),
+                  delay(1500),
+                ]);
+              }
+              await target.play();
+              await delay(900);
+              target.pause();
+            } catch { /* URL may already be present without play */ }
+            target.muted = wasMuted;
+          } else {
+            await delay(250);
+          }
+          elements = collectMedia();
         }
       }
 
       const fromElements = elements.map((element, index) => {
+        const preferAudio = element instanceof HTMLAudioElement ||
+          !element.videoWidth || element.videoWidth < 16;
         const values = [
           element.getAttribute("src"),
           element.currentSrc,
           ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src")),
         ];
-        const url = values.map(audioUrl).find(Boolean) || null;
+        const url = values.map((value) => looseMediaUrl(value, preferAudio)).find(Boolean) || null;
+        const blob = values.some((value) => String(value || "").startsWith("blob:"));
         const playedAt = Number(element.dataset.lessonCapturePlayedAt || 0);
         const last = window.__lessonCaptureLastAudio === element;
         const duration = Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null;
@@ -497,6 +546,7 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         return {
           id: `audio-${index}`,
           url,
+          blob,
           duration,
           label,
           playing: !element.paused,
@@ -507,11 +557,12 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
       });
 
       const elementUrls = new Set(fromElements.map((item) => item.url).filter(Boolean));
-      const fromNetwork = resourceUrls()
+      const fromNetwork = [...new Set([...resourceUrls(), ...anchorUrls()])]
         .filter((url) => !elementUrls.has(url))
         .map((url, index) => ({
           id: `network-${index}`,
           url,
+          blob: false,
           duration: null,
           label: pageTitle,
           playing: false,
@@ -521,7 +572,7 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         }));
 
       const candidates = [...fromElements, ...fromNetwork]
-        .filter((item) => item.url || item.protected)
+        .filter((item) => item.url || item.protected || item.blob)
         .sort((a, b) => Number(b.preferred) - Number(a.preferred) ||
           Number(b.playing) - Number(a.playing) ||
           (b.playedAt || 0) - (a.playedAt || 0));
@@ -539,6 +590,7 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
           preferred: item.preferred || item === preferred,
           hasUrl: Boolean(item.url),
           protected: item.protected,
+          blob: Boolean(item.blob),
         })),
         preferredId: preferred?.id || null,
         mediaUrl: preferred?.url || null,
@@ -547,6 +599,8 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         channel,
         site: location.hostname.replace(/^www\./, ""),
         protected: preferred?.protected || false,
+        hasBlobPlayer: candidates.some((item) => item.blob),
+        mediaCount: elements.length,
       };
     },
   });
@@ -565,78 +619,86 @@ async function listPageAudio(tabId) {
   }
 }
 
-async function resolveSelectedAudio(tabId, audioId) {
-  if (!audioId || !/^audio-\d+$/.test(audioId)) return null;
-  const [{ result }] = await chrome.scripting.executeScript({
+async function nudgePlayingMedia(tabId) {
+  await chrome.scripting.executeScript({
     target: { tabId },
-    args: [audioId],
-    func: async (id) => {
+    func: async () => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const audioUrl = (value) => {
-        try {
-          const url = new URL(value, location.href);
-          if (url.protocol !== "https:") return null;
-          const path = url.pathname.toLowerCase();
-          if (/\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)$/i.test(path)) return url.href;
-          return null;
-        } catch { return null; }
-      };
-      const all = [];
+      const media = [];
       const visit = (root) => {
         for (const element of root.querySelectorAll("*")) {
-          if (element instanceof HTMLAudioElement) all.push(element);
+          if (element instanceof HTMLMediaElement) media.push(element);
           else if (element.shadowRoot) visit(element.shadowRoot);
         }
       };
       visit(document);
-      const match = /^audio-(\d+)$/.exec(id || "");
-      const element = match ? all[Number(match[1])] : null;
-      if (!element) return null;
-      const read = () => {
-        const values = [element.getAttribute("src"), element.currentSrc,
-          ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src"))];
-        return {
-          mediaUrl: values.map(audioUrl).find(Boolean) || null,
-          duration: Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null,
-          protected: Boolean(element.mediaKeys),
-          label: (element.getAttribute("title") || element.getAttribute("aria-label") || "").trim().slice(0, 120),
-        };
-      };
-      let snapshot = read();
-      if (!snapshot.mediaUrl) {
-        const wasMuted = element.muted;
-        element.muted = true;
-        try {
-          await element.play();
-          await delay(900);
-          element.pause();
-        } catch { /* may already have a URL after play attempt */ }
-        element.muted = wasMuted;
-        snapshot = read();
-      }
-      return snapshot;
+      const target = media.find((el) => !el.paused) ||
+        (window.__lessonCaptureLastAudio instanceof HTMLMediaElement ? window.__lessonCaptureLastAudio : null) ||
+        media[0];
+      if (!target) return;
+      // Already playing: leave it alone so Capture does not stutter the call.
+      if (!target.paused) return;
+      const wasMuted = target.muted;
+      target.muted = true;
+      try {
+        await target.play();
+        await delay(1200);
+        target.pause();
+      } catch { /* network probe may still catch a prior request */ }
+      target.muted = wasMuted;
     },
-  });
-  return result;
+  }).catch(() => {});
+}
+
+async function probeAudioFromNetwork(tabId, waitMs = 4500) {
+  const existing = audioNetworkProbes.get(tabId);
+  if (existing?.mediaUrl) return existing;
+  let attachedHere = false;
+  const probe = { mediaUrl: null, mimeType: null };
+  audioNetworkProbes.set(tabId, probe);
+  try {
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3");
+      attachedHere = true;
+    } catch {
+      // Another debugger session may already be attached; still wait for events.
+    }
+    if (attachedHere) {
+      await chrome.debugger.sendCommand({ tabId }, "Network.enable");
+    }
+    await nudgePlayingMedia(tabId);
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      if (probe.mediaUrl) break;
+      await delay(150);
+    }
+    return probe.mediaUrl ? { mediaUrl: probe.mediaUrl, mimeType: probe.mimeType } : null;
+  } finally {
+    audioNetworkProbes.delete(tabId);
+    if (attachedHere) chrome.debugger.detach({ tabId }).catch(() => {});
+  }
 }
 
 async function currentPageAudio(tabId, required = false, audioId = null) {
   let inspection;
   try {
+    // Status/list polls must never warm. Warm only when Capture requires a URL.
     inspection = await inspectPageAudio(tabId, { warm: false, audioId });
-    if (!inspection?.mediaUrl) {
+    if (required && !inspection?.mediaUrl) {
       inspection = await inspectPageAudio(tabId, { warm: true, audioId });
     }
-    if (audioId) {
-      const selected = await resolveSelectedAudio(tabId, audioId);
-      if (selected?.mediaUrl) {
+    if (required && !inspection?.mediaUrl) {
+      const network = await probeAudioFromNetwork(tabId);
+      if (network?.mediaUrl) {
         inspection = {
-          ...inspection,
-          mediaUrl: selected.mediaUrl,
-          duration: selected.duration ?? inspection?.duration ?? null,
-          protected: selected.protected,
-          preferredId: audioId,
-          title: selected.label || inspection?.title,
+          ...(inspection || {}),
+          mediaUrl: network.mediaUrl,
+          mimeType: network.mimeType || null,
+          title: inspection?.title,
+          channel: inspection?.channel,
+          site: inspection?.site,
+          duration: inspection?.duration ?? null,
+          protected: false,
         };
       }
     }
@@ -648,12 +710,15 @@ async function currentPageAudio(tabId, required = false, audioId = null) {
     throw new Error("Unsupported protected player: direct audio download is unavailable.");
   }
   if (!inspection?.mediaUrl && required) {
-    throw new Error(inspection?.protected
-      ? "Unsupported protected player: no direct audio file is available."
+    throw new Error(inspection?.hasBlobPlayer
+      ? "This player uses a blob URL. Press play on the call, then Capture this audio so the real file request can be caught."
       : "No accessible audio file is displayed. Press play briefly on the call, then try again.");
   }
-  if (inspection?.mediaUrl && !isAudioMediaUrl(inspection.mediaUrl) && required) {
-    throw new Error("The page audio URL is not a supported audio file or stream.");
+  if (inspection?.mediaUrl && required) {
+    const ok = isAudioMediaUrl(inspection.mediaUrl) ||
+      AUDIO_MIME_RE.test(inspection.mimeType || "") ||
+      inspection.mediaUrl.startsWith("https://");
+    if (!ok) throw new Error("The page audio URL is not a supported audio file or stream.");
   }
   return inspection || null;
 }
@@ -667,10 +732,42 @@ async function audioCaptureKey(tab, audio) {
   return `${page.origin}${page.pathname}#audio=${short}`;
 }
 
+async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
+  const page = new URL(tab.url);
+  const title = pageAudioTitle(tab, audio);
+  const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "audio",
+      title,
+      lessonUrl: `${page.origin}${page.pathname}`,
+      referer: `${page.origin}/`,
+      jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
+      mediaUrl: audio.mediaUrl,
+      mediaMime: audio.mimeType || "",
+      expectedDurationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
+    }),
+  }));
+  const download = await response.json();
+  directDownloads.set(download.id, {
+    id: download.id,
+    lessonUrl: captureKey,
+    title,
+    kind: "audio",
+    status: download.status,
+    outputFile: download.outputFile,
+    sourceTabId: tab.id,
+    authRetries,
+  });
+  authorizationFailures.delete(captureKey);
+  await saveDownloadState();
+  ensureBadgePolling();
+  return { active: true, status: download.status };
+}
+
 async function startAudioDownload(tab, audioId = null) {
   const audio = await currentPageAudio(tab.id, true, audioId);
   const captureKey = await audioCaptureKey(tab, audio);
-  const page = new URL(tab.url);
   if (startingDirectDownloads.has(captureKey)) return { active: true, status: "already queued" };
   startingDirectDownloads.add(captureKey);
   try {
@@ -681,69 +778,14 @@ async function startAudioDownload(tab, audioId = null) {
       throw new Error(`All ${MAX_CONCURRENT_DOWNLOADS} download slots are busy. Try again when one finishes.`);
     }
     await requireCollector();
-    const title = pageAudioTitle(tab, audio);
-    const body = {
-      kind: "audio",
-      title,
-      lessonUrl: `${page.origin}${page.pathname}`,
-      referer: `${page.origin}/`,
-      jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
-      mediaUrl: audio.mediaUrl,
-      expectedDurationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
-    };
-    const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }));
-    const download = await response.json();
-    directDownloads.set(download.id, {
-      id: download.id,
-      lessonUrl: captureKey,
-      title,
-      kind: "audio",
-      status: download.status,
-      outputFile: download.outputFile,
-      sourceTabId: tab.id,
-      authRetries: 0,
-    });
-    authorizationFailures.delete(captureKey);
-    await saveDownloadState();
-    ensureBadgePolling();
-    return { active: true, status: download.status };
+    return await submitAudioJob(tab, audio, captureKey, 0);
   } catch (error) {
     if (isAuthExpiredError(error.message) && !startingDirectDownloads.has(`${captureKey}#retry`)) {
       startingDirectDownloads.add(`${captureKey}#retry`);
       try {
         await delay(800);
         const again = await currentPageAudio(tab.id, true, audioId);
-        const title = pageAudioTitle(tab, again);
-        const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: "audio",
-            title,
-            lessonUrl: `${page.origin}${page.pathname}`,
-            referer: `${page.origin}/`,
-            jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
-            mediaUrl: again.mediaUrl,
-            expectedDurationSeconds: Number.isFinite(again.duration) ? again.duration : null,
-          }),
-        }));
-        const download = await response.json();
-        directDownloads.set(download.id, {
-          id: download.id,
-          lessonUrl: captureKey,
-          title,
-          kind: "audio",
-          status: download.status,
-          outputFile: download.outputFile,
-          sourceTabId: tab.id,
-          authRetries: 1,
-        });
-        authorizationFailures.delete(captureKey);
-        await saveDownloadState();
-        ensureBadgePolling();
-        return { active: true, status: download.status };
+        return await submitAudioJob(tab, again, captureKey, 1);
       } catch (retryError) {
         authorizationFailures.set(captureKey, retryError.message || "The download could not start.");
         await saveDownloadState();
@@ -761,32 +803,33 @@ async function startAudioDownload(tab, audioId = null) {
 }
 
 async function refreshAudioDownloadForTab(tabId) {
+  await loadDownloadState();
+  // Prefer an in-flight/recent audio job for this tab. Never warm-play here —
+  // that was causing the call player to stutter every second.
+  const fromTab = [...directDownloads.values()].reverse()
+    .find((download) => download.sourceTabId === tabId && download.kind === "audio");
+  if (fromTab) {
+    const state = await refreshDirectDownloadForLesson(fromTab.lessonUrl);
+    if (fromTab.note) state.note = fromTab.note;
+    return state;
+  }
   const tab = await chrome.tabs.get(tabId);
-  const audio = await currentPageAudio(tabId, false);
-  if (!audio?.mediaUrl) {
-    const error = "No accessible audio file is displayed on this page.";
-    return { active: false, status: "unsupported", error };
-  }
-  const captureKey = await audioCaptureKey(tab, audio);
-  const state = await refreshDirectDownloadForLesson(captureKey);
-  if (state?.id) {
-    const download = directDownloads.get(state.id);
-    if (download?.note) state.note = download.note;
-  }
-  return state;
+  const inspection = await inspectPageAudio(tabId, { warm: false });
+  if (!inspection?.mediaUrl) return { active: false };
+  const captureKey = await audioCaptureKey(tab, inspection);
+  return refreshDirectDownloadForLesson(captureKey);
 }
 
 async function stopCurrentAudioDownload(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  const audio = await currentPageAudio(tab.id);
-  if (!audio?.mediaUrl) return { active: false, error: "No audio is displayed to stop." };
-  const captureKey = await audioCaptureKey(tab, audio);
-  const download = latestDirectDownloadForLesson(captureKey);
-  if (!download || download.status !== "downloading") {
-    return { active: false, error: "No active download for this audio." };
+  await loadDownloadState();
+  const fromTab = [...directDownloads.values()].reverse()
+    .find((download) => download.sourceTabId === tabId &&
+      download.kind === "audio" && download.status === "downloading");
+  if (fromTab) {
+    await cancelDirectDownload(fromTab.id);
+    return { active: false, status: "cancelled" };
   }
-  await cancelDirectDownload(download.id);
-  return { active: false, status: "cancelled" };
+  return { active: false, error: "No active download for this audio." };
 }
 
 async function startOtherSiteDownload(tab) {
@@ -1305,6 +1348,15 @@ async function finalizeCapture(tabId) {
 }
 
 chrome.debugger.onEvent.addListener(async (source, method, params) => {
+  const audioProbe = audioNetworkProbes.get(source.tabId);
+  if (audioProbe && method === "Network.responseReceived" && !audioProbe.mediaUrl) {
+    const url = params.response?.url || "";
+    const mimeType = params.response?.mimeType || "";
+    if (url.startsWith("https://") && isLikelyAudioNetworkUrl(url, mimeType)) {
+      audioProbe.mediaUrl = url;
+      audioProbe.mimeType = mimeType || null;
+    }
+  }
   const probe = downloadProbes.get(source.tabId);
   if (probe) {
     if (method === "Network.responseReceived" && !probe.submitted) {

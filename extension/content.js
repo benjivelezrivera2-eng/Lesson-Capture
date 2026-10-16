@@ -6,11 +6,11 @@ function findPlayers() {
   return [...document.querySelectorAll("video")];
 }
 
-// Remember which audio the user most recently started. Capture uses that when
-// a channel page has several inline players.
+// Remember which media the user most recently started. Capture uses that when
+// a channel page has several inline players (audio or audio-like video tags).
 document.addEventListener("play", (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLAudioElement)) return;
+  if (!(target instanceof HTMLMediaElement)) return;
   target.dataset.lessonCapturePlayedAt = String(Date.now());
   window.__lessonCaptureLastAudio = target;
 }, true);

@@ -184,9 +184,13 @@ public static class LessonCaptureCollector
         var kind = Text(payload, "kind", "video").Trim().ToLowerInvariant();
         if (kind != "audio") kind = "video";
         Uri media;
+        var mediaMime = Text(payload, "mediaMime", "");
         if (kind == "audio")
         {
-            if (!IsPublicAudioUrl(mediaUrl, out media))
+            // Call CDNs sometimes omit a file extension; accept those when the
+            // browser reported an audio MIME type, or when the path looks like audio.
+            if (!IsPublicAudioUrl(mediaUrl, out media) &&
+                !(mediaMime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) && IsPublicHttpsUrl(mediaUrl, out media)))
             {
                 Respond(context, HttpStatusCode.BadRequest, new { error = "An accessible public HTTPS audio file or stream URL is required." });
                 return;
@@ -683,11 +687,17 @@ public static class LessonCaptureCollector
             path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsPublicAudioUrl(string value, out Uri media)
+    private static bool IsPublicHttpsUrl(string value, out Uri media)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out media) || media.Scheme != "https" ||
             !string.IsNullOrEmpty(media.UserInfo) || media.Port != 443 || value.Length > 16384 ||
             !IsPublicHost(media.Host)) return false;
+        return true;
+    }
+
+    private static bool IsPublicAudioUrl(string value, out Uri media)
+    {
+        if (!IsPublicHttpsUrl(value, out media)) return false;
         var path = media.AbsolutePath;
         return path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
             path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase) ||
