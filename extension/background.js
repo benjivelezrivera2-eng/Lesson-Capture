@@ -187,6 +187,7 @@ async function refreshAllDirectDownloads() {
       download.segmentsTotal = state.segmentsTotal ?? 0;
       download.bytesDownloaded = state.bytesDownloaded ?? 0;
       download.percent = state.percent ?? null;
+      download.note = state.note || download.note || null;
       if (state.status === "failed" && isAuthExpiredError(state.error) && (download.authRetries || 0) < 1 && download.sourceTabId) {
         download.authRetries = (download.authRetries || 0) + 1;
         await saveDownloadState();
@@ -373,6 +374,419 @@ async function otherSiteCaptureKey(tab, video) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
   const short = [...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${page.origin}${page.pathname}#media=${short}`;
+}
+
+const AUDIO_PATH_RE = /\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)(?:$|\?)/i;
+
+function isAudioMediaUrl(value) {
+  try {
+    const url = new URL(value, "https://example.com");
+    if (url.protocol !== "https:") return false;
+    const path = url.pathname.toLowerCase();
+    if (AUDIO_PATH_RE.test(path)) return true;
+    // Some CDNs put the extension only in a query parameter.
+    return AUDIO_PATH_RE.test(url.search);
+  } catch {
+    return false;
+  }
+}
+
+function pageAudioTitle(tab, audio) {
+  const channel = audio.channel || "";
+  const post = audio.title || tab.title || "audio";
+  const host = audio.site || (() => {
+    try { return new URL(tab.url).hostname.replace(/^www\./, ""); } catch { return "page"; }
+  })();
+  const parts = [channel || host, post].filter(Boolean);
+  return parts.join(" - ").slice(0, 160);
+}
+
+// Inspect the clicked tab for <audio> sources. Signed URLs are passed only in
+// the download request body and never written to persisted extension state.
+async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [{ warm: Boolean(warm), audioId }],
+    func: async (options) => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const audioUrl = (value) => {
+        try {
+          const url = new URL(value, location.href);
+          if (url.protocol !== "https:") return null;
+          const path = url.pathname.toLowerCase();
+          if (/\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)$/i.test(path)) return url.href;
+          if (/\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)(?:$|&)/i.test(url.search)) return url.href;
+          return null;
+        } catch { return null; }
+      };
+      const collectElements = () => {
+        const found = [];
+        const visit = (root) => {
+          for (const element of root.querySelectorAll("*")) {
+            if (element instanceof HTMLAudioElement) found.push(element);
+            else if (element.shadowRoot) visit(element.shadowRoot);
+          }
+        };
+        visit(document);
+        return found;
+      };
+      const resourceUrls = () => {
+        try {
+          return performance.getEntriesByType("resource")
+            .map((entry) => audioUrl(entry.name))
+            .filter(Boolean);
+        } catch { return []; }
+      };
+      const channel = (
+        document.querySelector('[data-testid*="channel" i]')?.textContent ||
+        document.querySelector('nav [aria-current="page"]')?.textContent ||
+        [...document.querySelectorAll("a, h1, h2, span")]
+          .map((node) => (node.textContent || "").trim())
+          .find((text) => /^#[\w-]+$/.test(text)) ||
+        ""
+      ).trim().replace(/^#/, "").slice(0, 80);
+      const pageTitle = (
+        document.querySelector("h1")?.textContent ||
+        document.querySelector("[data-testid*='title' i]")?.textContent ||
+        document.title ||
+        "audio"
+      ).trim().slice(0, 140);
+
+      let elements = collectElements();
+      if (options.warm && elements.length) {
+        const target = options.audioId
+          ? elements.find((el, index) => `audio-${index}` === options.audioId) || elements[0]
+          : (window.__lessonCaptureLastAudio instanceof HTMLAudioElement
+            ? window.__lessonCaptureLastAudio
+            : elements.find((el) => !el.paused) || elements[0]);
+        if (target) {
+          const wasMuted = target.muted;
+          target.muted = true;
+          try {
+            if (target.readyState < HTMLMediaElement.HAVE_METADATA) {
+              await Promise.race([
+                new Promise((resolve) => target.addEventListener("loadedmetadata", resolve, { once: true })),
+                delay(1500),
+              ]);
+            }
+            await target.play();
+            await delay(900);
+            target.pause();
+          } catch { /* URL may already be present without play */ }
+          target.muted = wasMuted;
+          elements = collectElements();
+        }
+      }
+
+      const fromElements = elements.map((element, index) => {
+        const values = [
+          element.getAttribute("src"),
+          element.currentSrc,
+          ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src")),
+        ];
+        const url = values.map(audioUrl).find(Boolean) || null;
+        const playedAt = Number(element.dataset.lessonCapturePlayedAt || 0);
+        const last = window.__lessonCaptureLastAudio === element;
+        const duration = Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null;
+        const label = (
+          element.getAttribute("title") ||
+          element.getAttribute("aria-label") ||
+          element.closest("article, li, [role='listitem'], [data-testid]")?.querySelector("h2, h3, time, [data-testid*='title' i]")?.textContent ||
+          pageTitle
+        ).trim().slice(0, 120) || `Audio ${index + 1}`;
+        return {
+          id: `audio-${index}`,
+          url,
+          duration,
+          label,
+          playing: !element.paused,
+          playedAt,
+          preferred: last || playedAt > 0,
+          protected: Boolean(element.mediaKeys),
+        };
+      });
+
+      const elementUrls = new Set(fromElements.map((item) => item.url).filter(Boolean));
+      const fromNetwork = resourceUrls()
+        .filter((url) => !elementUrls.has(url))
+        .map((url, index) => ({
+          id: `network-${index}`,
+          url,
+          duration: null,
+          label: pageTitle,
+          playing: false,
+          playedAt: 0,
+          preferred: false,
+          protected: false,
+        }));
+
+      const candidates = [...fromElements, ...fromNetwork]
+        .filter((item) => item.url || item.protected)
+        .sort((a, b) => Number(b.preferred) - Number(a.preferred) ||
+          Number(b.playing) - Number(a.playing) ||
+          (b.playedAt || 0) - (a.playedAt || 0));
+
+      const preferred = candidates.find((item) => item.preferred && item.url)
+        || candidates.find((item) => item.playing && item.url)
+        || candidates.find((item) => item.url)
+        || null;
+
+      return {
+        candidates: candidates.map((item) => ({
+          id: item.id,
+          label: item.label,
+          duration: item.duration,
+          preferred: item.preferred || item === preferred,
+          hasUrl: Boolean(item.url),
+          protected: item.protected,
+        })),
+        preferredId: preferred?.id || null,
+        mediaUrl: preferred?.url || null,
+        duration: preferred?.duration ?? null,
+        title: preferred?.label || pageTitle,
+        channel,
+        site: location.hostname.replace(/^www\./, ""),
+        protected: preferred?.protected || false,
+      };
+    },
+  });
+  return result;
+}
+
+async function listPageAudio(tabId) {
+  try {
+    const inspection = await inspectPageAudio(tabId, { warm: false });
+    return {
+      candidates: inspection?.candidates || [],
+      preferredId: inspection?.preferredId || null,
+    };
+  } catch {
+    return { candidates: [], preferredId: null };
+  }
+}
+
+async function resolveSelectedAudio(tabId, audioId) {
+  if (!audioId || !/^audio-\d+$/.test(audioId)) return null;
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [audioId],
+    func: async (id) => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const audioUrl = (value) => {
+        try {
+          const url = new URL(value, location.href);
+          if (url.protocol !== "https:") return null;
+          const path = url.pathname.toLowerCase();
+          if (/\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)$/i.test(path)) return url.href;
+          return null;
+        } catch { return null; }
+      };
+      const all = [];
+      const visit = (root) => {
+        for (const element of root.querySelectorAll("*")) {
+          if (element instanceof HTMLAudioElement) all.push(element);
+          else if (element.shadowRoot) visit(element.shadowRoot);
+        }
+      };
+      visit(document);
+      const match = /^audio-(\d+)$/.exec(id || "");
+      const element = match ? all[Number(match[1])] : null;
+      if (!element) return null;
+      const read = () => {
+        const values = [element.getAttribute("src"), element.currentSrc,
+          ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src"))];
+        return {
+          mediaUrl: values.map(audioUrl).find(Boolean) || null,
+          duration: Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null,
+          protected: Boolean(element.mediaKeys),
+          label: (element.getAttribute("title") || element.getAttribute("aria-label") || "").trim().slice(0, 120),
+        };
+      };
+      let snapshot = read();
+      if (!snapshot.mediaUrl) {
+        const wasMuted = element.muted;
+        element.muted = true;
+        try {
+          await element.play();
+          await delay(900);
+          element.pause();
+        } catch { /* may already have a URL after play attempt */ }
+        element.muted = wasMuted;
+        snapshot = read();
+      }
+      return snapshot;
+    },
+  });
+  return result;
+}
+
+async function currentPageAudio(tabId, required = false, audioId = null) {
+  let inspection;
+  try {
+    inspection = await inspectPageAudio(tabId, { warm: false, audioId });
+    if (!inspection?.mediaUrl) {
+      inspection = await inspectPageAudio(tabId, { warm: true, audioId });
+    }
+    if (audioId) {
+      const selected = await resolveSelectedAudio(tabId, audioId);
+      if (selected?.mediaUrl) {
+        inspection = {
+          ...inspection,
+          mediaUrl: selected.mediaUrl,
+          duration: selected.duration ?? inspection?.duration ?? null,
+          protected: selected.protected,
+          preferredId: audioId,
+          title: selected.label || inspection?.title,
+        };
+      }
+    }
+  } catch {
+    if (required) throw new Error("This page's audio could not be inspected. Open the call and click the extension again.");
+    return null;
+  }
+  if (inspection?.protected && required) {
+    throw new Error("Unsupported protected player: direct audio download is unavailable.");
+  }
+  if (!inspection?.mediaUrl && required) {
+    throw new Error(inspection?.protected
+      ? "Unsupported protected player: no direct audio file is available."
+      : "No accessible audio file is displayed. Press play briefly on the call, then try again.");
+  }
+  if (inspection?.mediaUrl && !isAudioMediaUrl(inspection.mediaUrl) && required) {
+    throw new Error("The page audio URL is not a supported audio file or stream.");
+  }
+  return inspection || null;
+}
+
+async function audioCaptureKey(tab, audio) {
+  const media = new URL(audio.mediaUrl);
+  const page = new URL(tab.url);
+  const identity = `${page.origin}${page.pathname}|${media.origin}${media.pathname}|audio`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+  const short = [...new Uint8Array(digest)].slice(0, 12).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${page.origin}${page.pathname}#audio=${short}`;
+}
+
+async function startAudioDownload(tab, audioId = null) {
+  const audio = await currentPageAudio(tab.id, true, audioId);
+  const captureKey = await audioCaptureKey(tab, audio);
+  const page = new URL(tab.url);
+  if (startingDirectDownloads.has(captureKey)) return { active: true, status: "already queued" };
+  startingDirectDownloads.add(captureKey);
+  try {
+    await loadDownloadState();
+    await refreshAllDirectDownloads();
+    if (isQueuedOrDownloading(captureKey)) return { active: true, status: "already queued" };
+    if (directDownloadStates().length >= MAX_CONCURRENT_DOWNLOADS) {
+      throw new Error(`All ${MAX_CONCURRENT_DOWNLOADS} download slots are busy. Try again when one finishes.`);
+    }
+    await requireCollector();
+    const title = pageAudioTitle(tab, audio);
+    const body = {
+      kind: "audio",
+      title,
+      lessonUrl: `${page.origin}${page.pathname}`,
+      referer: `${page.origin}/`,
+      jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
+      mediaUrl: audio.mediaUrl,
+      expectedDurationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
+    };
+    const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    const download = await response.json();
+    directDownloads.set(download.id, {
+      id: download.id,
+      lessonUrl: captureKey,
+      title,
+      kind: "audio",
+      status: download.status,
+      outputFile: download.outputFile,
+      sourceTabId: tab.id,
+      authRetries: 0,
+    });
+    authorizationFailures.delete(captureKey);
+    await saveDownloadState();
+    ensureBadgePolling();
+    return { active: true, status: download.status };
+  } catch (error) {
+    if (isAuthExpiredError(error.message) && !startingDirectDownloads.has(`${captureKey}#retry`)) {
+      startingDirectDownloads.add(`${captureKey}#retry`);
+      try {
+        await delay(800);
+        const again = await currentPageAudio(tab.id, true, audioId);
+        const title = pageAudioTitle(tab, again);
+        const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "audio",
+            title,
+            lessonUrl: `${page.origin}${page.pathname}`,
+            referer: `${page.origin}/`,
+            jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
+            mediaUrl: again.mediaUrl,
+            expectedDurationSeconds: Number.isFinite(again.duration) ? again.duration : null,
+          }),
+        }));
+        const download = await response.json();
+        directDownloads.set(download.id, {
+          id: download.id,
+          lessonUrl: captureKey,
+          title,
+          kind: "audio",
+          status: download.status,
+          outputFile: download.outputFile,
+          sourceTabId: tab.id,
+          authRetries: 1,
+        });
+        authorizationFailures.delete(captureKey);
+        await saveDownloadState();
+        ensureBadgePolling();
+        return { active: true, status: download.status };
+      } catch (retryError) {
+        authorizationFailures.set(captureKey, retryError.message || "The download could not start.");
+        await saveDownloadState();
+        throw retryError;
+      } finally {
+        startingDirectDownloads.delete(`${captureKey}#retry`);
+      }
+    }
+    authorizationFailures.set(captureKey, error.message || "The download could not start.");
+    await saveDownloadState();
+    throw error;
+  } finally {
+    startingDirectDownloads.delete(captureKey);
+  }
+}
+
+async function refreshAudioDownloadForTab(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const audio = await currentPageAudio(tabId, false);
+  if (!audio?.mediaUrl) {
+    const error = "No accessible audio file is displayed on this page.";
+    return { active: false, status: "unsupported", error };
+  }
+  const captureKey = await audioCaptureKey(tab, audio);
+  const state = await refreshDirectDownloadForLesson(captureKey);
+  if (state?.id) {
+    const download = directDownloads.get(state.id);
+    if (download?.note) state.note = download.note;
+  }
+  return state;
+}
+
+async function stopCurrentAudioDownload(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  const audio = await currentPageAudio(tab.id);
+  if (!audio?.mediaUrl) return { active: false, error: "No audio is displayed to stop." };
+  const captureKey = await audioCaptureKey(tab, audio);
+  const download = latestDirectDownloadForLesson(captureKey);
+  if (!download || download.status !== "downloading") {
+    return { active: false, error: "No active download for this audio." };
+  }
+  await cancelDirectDownload(download.id);
+  return { active: false, status: "cancelled" };
 }
 
 async function startOtherSiteDownload(tab) {
@@ -610,12 +1024,14 @@ async function refreshDirectDownloadForLesson(lessonUrl) {
     download.segmentsTotal = state.segmentsTotal ?? 0;
     download.bytesDownloaded = state.bytesDownloaded ?? 0;
     download.percent = state.percent ?? null;
+    download.note = state.note || download.note || null;
     await saveDownloadState();
     return {
       active: state.status === "downloading",
       status: state.status,
       outputFile: state.outputFile,
       error: state.error,
+      note: download.note,
       title: download.title,
       id: download.id,
       progress: progressLabel(download),
@@ -941,6 +1357,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "LESSON_DIRECT_DOWNLOAD_START") {
     startDirectDownload(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message })); return true;
   }
+  if (message.type === "LESSON_AUDIO_DOWNLOAD_START") {
+    chrome.tabs.get(message.tabId)
+      .then((tab) => startAudioDownload(tab, message.audioId || null))
+      .then(sendResponse)
+      .catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.type === "LESSON_AUDIO_LIST") {
+    listPageAudio(message.tabId).then(sendResponse).catch(() => sendResponse({ candidates: [], preferredId: null }));
+    return true;
+  }
+  if (message.type === "LESSON_AUDIO_DOWNLOAD_STATUS") {
+    refreshAudioDownloadForTab(message.tabId).then(sendResponse).catch(() => sendResponse({ active: false }));
+    return true;
+  }
+  if (message.type === "LESSON_AUDIO_DOWNLOAD_STOP") {
+    stopCurrentAudioDownload(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
   if (message.type === "LESSON_CAPTURE_STOP") {
     stopCurrentDirectDownload(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
     return true;
@@ -988,6 +1423,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         percent: download.percent ?? null,
         outputFile: download.outputFile || null,
         error: download.error || null,
+        note: download.note || null,
       })),
     }));
     return true;

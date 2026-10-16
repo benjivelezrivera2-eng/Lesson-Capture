@@ -11,6 +11,7 @@
 !/extension/popup.css
 !/extension/popup.html
 !/extension/popup.js
+!/extension/sidepanel.html
 
 /local-collector/*
 !/local-collector/build.ps1

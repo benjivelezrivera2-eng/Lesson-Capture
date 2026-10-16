@@ -9,9 +9,17 @@ const progress = document.querySelector("#progress");
 const fill = document.querySelector("#fill");
 const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
+const modeAudio = document.querySelector("#mode-audio");
+const modeVideo = document.querySelector("#mode-video");
+const audioPickWrap = document.querySelector("#audio-pick-wrap");
+const audioPick = document.querySelector("#audio-pick");
 const THEME_KEY = "lessonCaptureTheme";
+const MODE_KEY = "lessonCaptureMode";
 
 let revealTarget = null;
+let captureMode = "video";
+let audioCandidates = [];
+let lastAudioListAt = 0;
 
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -41,6 +49,30 @@ async function toggleTheme() {
   await chrome.storage.local.set({ [THEME_KEY]: next });
 }
 
+function applyMode(mode) {
+  captureMode = mode === "audio" ? "audio" : "video";
+  modeAudio?.classList.toggle("is-active", captureMode === "audio");
+  modeVideo?.classList.toggle("is-active", captureMode === "video");
+  modeAudio?.setAttribute("aria-pressed", captureMode === "audio" ? "true" : "false");
+  modeVideo?.setAttribute("aria-pressed", captureMode === "video" ? "true" : "false");
+  if (captureMode === "video" && audioPickWrap) {
+    audioPickWrap.hidden = true;
+    audioCandidates = [];
+  }
+}
+
+async function loadMode() {
+  const stored = await chrome.storage.local.get({ [MODE_KEY]: "video" });
+  applyMode(stored[MODE_KEY]);
+}
+
+async function setMode(mode) {
+  applyMode(mode);
+  await chrome.storage.local.set({ [MODE_KEY]: captureMode });
+  lastAudioListAt = 0;
+  await refresh();
+}
+
 function setProgress(visible, percent, label) {
   progress.hidden = !visible;
   if (!visible) {
@@ -54,30 +86,99 @@ function setProgress(visible, percent, label) {
   progressText.textContent = label || "";
 }
 
+function startLabel(state) {
+  if (captureMode === "audio") {
+    return state.status === "complete" ? "Capture this audio again" : "Capture this audio";
+  }
+  return state.status === "complete" ? "Capture this video again" : "Capture this video";
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const total = Math.round(value);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function renderAudioPick(candidates, selectedId) {
+  if (!audioPickWrap || !audioPick) return;
+  audioCandidates = Array.isArray(candidates) ? candidates : [];
+  if (captureMode !== "audio" || audioCandidates.length < 2) {
+    audioPickWrap.hidden = true;
+    return;
+  }
+  const previous = selectedId || audioPick.value;
+  audioPick.replaceChildren();
+  for (const item of audioCandidates) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    const length = formatDuration(item.duration);
+    option.textContent = `${item.label || "Audio"}${length ? ` (${length})` : ""}`;
+    audioPick.append(option);
+  }
+  const preferred = audioCandidates.find((item) => item.id === previous)
+    || audioCandidates.find((item) => item.preferred)
+    || audioCandidates[0];
+  if (preferred) audioPick.value = preferred.id;
+  audioPickWrap.hidden = false;
+}
+
+async function refreshAudioCandidates(force = false) {
+  if (captureMode !== "audio") {
+    renderAudioPick([]);
+    return;
+  }
+  if (!force && Date.now() - lastAudioListAt < 5000) return;
+  try {
+    const tab = await activeTab();
+    const result = await chrome.runtime.sendMessage({
+      type: "LESSON_AUDIO_LIST", tabId: tab.id,
+    });
+    lastAudioListAt = Date.now();
+    renderAudioPick(result?.candidates || [], result?.preferredId);
+  } catch {
+    renderAudioPick([]);
+  }
+}
+
 async function refresh() {
   const tab = await activeTab();
   const [state, queue] = await Promise.all([
-    chrome.runtime.sendMessage({ type: "LESSON_DIRECT_DOWNLOAD_STATUS", tabId: tab.id }),
+    chrome.runtime.sendMessage({
+      type: captureMode === "audio" ? "LESSON_AUDIO_DOWNLOAD_STATUS" : "LESSON_DIRECT_DOWNLOAD_STATUS",
+      tabId: tab.id,
+    }),
     chrome.runtime.sendMessage({ type: "LESSON_CAPTURE_JOBS" }),
   ]);
   start.disabled = state.active;
-  start.textContent = state.status === "complete" ? "Capture this video again" : "Capture this video";
+  start.textContent = startLabel(state);
   if (stop) stop.disabled = !state.active;
 
   if (state.error) {
     status.textContent = `Download failed or unsupported: ${state.error}`;
     setProgress(false);
   } else if (state.active) {
-    status.textContent = "Downloading this displayed video. You can click Next and capture the next one.";
+    status.textContent = captureMode === "audio"
+      ? "Downloading this audio. You can keep using the tab while it finishes."
+      : "Downloading this displayed video. You can click Next and capture the next one.";
     setProgress(true, state.percent, state.progress || "Downloading…");
   } else if (state.status === "complete") {
-    status.textContent = `Finished: ${shortPath(state.outputFile)}. Click Next for another step, or capture again.`;
-    setProgress(true, 100, "Finished");
+    const note = state.note ? ` ${state.note}` : "";
+    status.textContent = `Finished: ${shortPath(state.outputFile)}.${note}`;
+    setProgress(true, 100, state.note || "Finished");
   } else if (state.status === "cancelled") {
-    status.textContent = "Stopped. Capture again when you want this video.";
+    status.textContent = captureMode === "audio"
+      ? "Stopped. Capture again when you want this audio."
+      : "Stopped. Capture again when you want this video.";
     setProgress(false);
   } else {
-    status.textContent = "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
+    status.textContent = captureMode === "audio"
+      ? "Ready. This captures the audio on the page without playing it through."
+      : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
     setProgress(false);
   }
 
@@ -104,7 +205,9 @@ async function refresh() {
     }`;
     meta.textContent = job.status === "failed"
       ? (job.error || "Failed")
-      : job.progress || job.status;
+      : job.note
+        ? `${job.progress || job.status} · ${job.note}`
+        : job.progress || job.status;
     item.append(title, meta);
     if (job.status === "downloading") {
       const bar = document.createElement("div");
@@ -142,16 +245,27 @@ async function refresh() {
     }
     jobs.append(item);
   }
+
+  await refreshAudioCandidates();
 }
 
 start.addEventListener("click", async () => {
   const tab = await activeTab();
-  const result = await chrome.runtime.sendMessage({ type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id });
+  const payload = captureMode === "audio"
+    ? {
+      type: "LESSON_AUDIO_DOWNLOAD_START",
+      tabId: tab.id,
+      audioId: audioPick && !audioPickWrap?.hidden ? audioPick.value : null,
+    }
+    : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
+  const result = await chrome.runtime.sendMessage(payload);
   if (result.error) {
     status.textContent = `Download failed or unsupported: ${result.error}`;
     return;
   }
-  status.textContent = "Current video queued. A .partial.mp4 appears in Lesson Captures while it downloads.";
+  status.textContent = captureMode === "audio"
+    ? "Audio queued. A file appears in Lesson Captures while it downloads."
+    : "Current video queued. A .partial.mp4 appears in Lesson Captures while it downloads.";
   await refresh();
 });
 
@@ -167,7 +281,11 @@ reveal.addEventListener("click", async () => {
 
 stop?.addEventListener("click", async () => {
   const tab = await activeTab();
-  const result = await chrome.runtime.sendMessage({ type: "LESSON_CAPTURE_STOP", tabId: tab.id, lessonUrl: tab.url });
+  const result = await chrome.runtime.sendMessage({
+    type: captureMode === "audio" ? "LESSON_AUDIO_DOWNLOAD_STOP" : "LESSON_CAPTURE_STOP",
+    tabId: tab.id,
+    lessonUrl: tab.url,
+  });
   status.textContent = result.error || "Stopped this download.";
   await refresh();
 });
@@ -180,10 +298,12 @@ stopAll?.addEventListener("click", async () => {
 });
 
 themeButton?.addEventListener("click", () => { toggleTheme().catch(() => {}); });
+modeAudio?.addEventListener("click", () => { setMode("audio").catch(() => {}); });
+modeVideo?.addEventListener("click", () => { setMode("video").catch(() => {}); });
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "CAPTURE_STATUS") refresh();
 });
 
-loadTheme().then(refresh).catch(refresh);
+Promise.all([loadTheme(), loadMode()]).then(refresh).catch(refresh);
 setInterval(refresh, 1000);

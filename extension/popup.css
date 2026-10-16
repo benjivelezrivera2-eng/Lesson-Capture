@@ -100,6 +100,63 @@ h1 {
   font: 600 12px/1 "Source Sans 3", sans-serif;
 }
 
+.mode-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.mode-btn {
+  width: 100%;
+  margin: 0;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  font: 600 13px/1 Outfit, "Segoe UI", sans-serif;
+  box-shadow: none;
+}
+
+.mode-btn.is-active {
+  background: linear-gradient(135deg, var(--accent) 0%, #1aa896 70%);
+  color: var(--accent-ink);
+}
+
+.audio-pick {
+  display: block;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.audio-pick[hidden] { display: none; }
+
+.audio-pick span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.audio-pick select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 13px/1.3 "Source Sans 3", "Segoe UI", sans-serif;
+}
+
 p { margin: 0 0 10px; }
 #status {
   min-height: 40px;
