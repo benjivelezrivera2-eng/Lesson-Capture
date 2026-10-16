@@ -3,7 +3,8 @@ const LOCAL_RECEIVER = "http://127.0.0.1:8766";
 // Five is a practical batch size: it removes babysitting while avoiding the
 // bandwidth and memory failures that an unlimited number of players invites.
 const MAX_CONCURRENT_CAPTURES = 5;
-const MAX_CONCURRENT_DOWNLOADS = 3;
+// Ten lessons download at once. Further captures stay queued until a slot frees.
+const MAX_CONCURRENT_DOWNLOADS = 10;
 // A direct download can run in the background, but its signed stream must be
 // authorized in a real course tab. Keep that visibly disruptive step serial.
 const MAX_CONCURRENT_AUTHORIZATIONS = 1;

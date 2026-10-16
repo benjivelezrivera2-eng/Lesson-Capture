@@ -78,9 +78,9 @@ public static class LessonCaptureCollector
             return;
         }
         // HttpWebRequest allows only 2 connections per host by default. Raise
-        // that so MaxParallelSegments workers can actually fetch at once (room
-        // for a few concurrent lesson downloads hitting the same CDN).
-        ServicePointManager.DefaultConnectionLimit = MaxParallelSegments * 3;
+        // that so MaxParallelSegments workers can actually fetch at once across
+        // the same number of concurrent lesson downloads the extension allows.
+        ServicePointManager.DefaultConnectionLimit = MaxParallelSegments * 10;
         Directory.CreateDirectory(CaptureRoot);
         Directory.CreateDirectory(FinishedVideoRoot);
         using (var listener = new HttpListener())
