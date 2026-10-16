@@ -88,7 +88,7 @@ async function refresh() {
 
   const running = (queue.jobs || []).filter((job) => job.status === "downloading").length;
   if (stopAll) stopAll.disabled = running === 0;
-  summary.textContent = `${running}/${queue.limit ?? 3} running, ${queue.queued ?? 0} waiting`;
+  summary.textContent = `${running}/${queue.limit ?? 10} running, ${queue.queued ?? 0} waiting`;
 
   jobs.replaceChildren();
   for (const job of queue.jobs || []) {
