@@ -117,10 +117,12 @@ function renderAudioPick(candidates, selectedId) {
     const option = document.createElement("option");
     option.value = item.id;
     const length = formatDuration(item.duration);
-    option.textContent = `${item.label || "Audio"}${length ? ` (${length})` : ""}`;
+    const playing = item.playing ? " · playing" : "";
+    option.textContent = `${item.label || "Audio"}${length ? ` (${length})` : ""}${playing}`;
     audioPick.append(option);
   }
   const preferred = audioCandidates.find((item) => item.id === previous)
+    || audioCandidates.find((item) => item.playing)
     || audioCandidates.find((item) => item.preferred)
     || audioCandidates[0];
   if (preferred) audioPick.value = preferred.id;

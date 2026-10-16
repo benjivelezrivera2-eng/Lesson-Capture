@@ -184,13 +184,11 @@ public static class LessonCaptureCollector
         var kind = Text(payload, "kind", "video").Trim().ToLowerInvariant();
         if (kind != "audio") kind = "video";
         Uri media;
-        var mediaMime = Text(payload, "mediaMime", "");
         if (kind == "audio")
         {
-            // Call CDNs sometimes omit a file extension; accept those when the
-            // browser reported an audio MIME type, or when the path looks like audio.
-            if (!IsPublicAudioUrl(mediaUrl, out media) &&
-                !(mediaMime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) && IsPublicHttpsUrl(mediaUrl, out media)))
+            // Call-archive CDNs often serve extensionless HTTPS URLs. Accept any
+            // public HTTPS URL for audio; VerifyAudio still requires an audio stream.
+            if (!IsPublicHttpsUrl(mediaUrl, out media))
             {
                 Respond(context, HttpStatusCode.BadRequest, new { error = "An accessible public HTTPS audio file or stream URL is required." });
                 return;
@@ -695,21 +693,6 @@ public static class LessonCaptureCollector
         return true;
     }
 
-    private static bool IsPublicAudioUrl(string value, out Uri media)
-    {
-        if (!IsPublicHttpsUrl(value, out media)) return false;
-        var path = media.AbsolutePath;
-        return path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".aac", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".opus", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-            path.EndsWith(".mpd", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static string GuessAudioExtension(string mediaUrl)
     {
         try
@@ -726,7 +709,8 @@ public static class LessonCaptureCollector
             if (path.EndsWith(".mpd")) return ".mpd";
         }
         catch { /* fall through */ }
-        return ".bin";
+        // Extensionless CDN URLs are usually MP3; default so remux/copy path works.
+        return ".mp3";
     }
 
     private static bool IsPublicHost(string host)

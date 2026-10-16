@@ -397,6 +397,14 @@ function isLikelyAudioNetworkUrl(url, mimeType = "") {
   return isAudioMediaUrl(url);
 }
 
+// Extensionless CDN URLs need an audio MIME so older collectors accept them;
+// current collector accepts any public HTTPS for kind=audio.
+function audioMimeForCollector(mediaUrl, mimeType = "") {
+  if (AUDIO_MIME_RE.test(mimeType || "")) return mimeType;
+  if (isAudioMediaUrl(mediaUrl)) return mimeType || "";
+  return "audio/mpeg";
+}
+
 function pageAudioTitle(tab, audio) {
   const channel = audio.channel || "";
   const post = audio.title || tab.title || "audio";
@@ -409,7 +417,8 @@ function pageAudioTitle(tab, audio) {
 
 // Inspect the clicked tab for media sources. Signed URLs are passed only in
 // the download request body and never written to persisted extension state.
-// warm=true may briefly play a paused player once; never call it from the 1s poll.
+// warm=true may briefly play a paused player once on Capture only — never from
+// status/list polls (those stuttered the call every ~1s).
 async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -494,14 +503,17 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
       ).trim().slice(0, 140);
 
       let elements = collectMedia();
+      // warm runs at most once per Capture when no HTTPS URL was found yet.
+      // If the user already pressed play, only read currentSrc — never pause.
       if (options.warm && elements.length) {
         const target = options.audioId
           ? elements.find((el, index) => `audio-${index}` === options.audioId) || elements[0]
-          : (window.__lessonCaptureLastAudio instanceof HTMLMediaElement
-            ? window.__lessonCaptureLastAudio
-            : elements.find((el) => !el.paused) || elements[0]);
+          : (elements.find((el) => !el.paused)
+            || (window.__lessonCaptureLastAudio instanceof HTMLMediaElement
+              ? window.__lessonCaptureLastAudio
+              : null)
+            || elements[0]);
         if (target) {
-          // If the user is already playing, only read the URL. Do not pause.
           if (target.paused) {
             const wasMuted = target.muted;
             target.muted = true;
@@ -517,8 +529,6 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
               target.pause();
             } catch { /* URL may already be present without play */ }
             target.muted = wasMuted;
-          } else {
-            await delay(250);
           }
           elements = collectMedia();
         }
@@ -528,8 +538,8 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
         const preferAudio = element instanceof HTMLAudioElement ||
           !element.videoWidth || element.videoWidth < 16;
         const values = [
-          element.getAttribute("src"),
           element.currentSrc,
+          element.getAttribute("src"),
           ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src")),
         ];
         const url = values.map((value) => looseMediaUrl(value, preferAudio)).find(Boolean) || null;
@@ -573,20 +583,28 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
 
       const candidates = [...fromElements, ...fromNetwork]
         .filter((item) => item.url || item.protected || item.blob)
-        .sort((a, b) => Number(b.preferred) - Number(a.preferred) ||
-          Number(b.playing) - Number(a.playing) ||
+        .sort((a, b) => Number(b.playing) - Number(a.playing) ||
+          Number(b.preferred) - Number(a.preferred) ||
           (b.playedAt || 0) - (a.playedAt || 0));
 
-      const preferred = candidates.find((item) => item.preferred && item.url)
-        || candidates.find((item) => item.playing && item.url)
-        || candidates.find((item) => item.url)
-        || null;
+      // Explicit picker id wins; otherwise whatever is currently playing.
+      let preferred = null;
+      if (options.audioId) {
+        preferred = candidates.find((item) => item.id === options.audioId && item.url) || null;
+      }
+      if (!preferred) {
+        preferred = candidates.find((item) => item.playing && item.url)
+          || candidates.find((item) => item.preferred && item.url)
+          || candidates.find((item) => item.url)
+          || null;
+      }
 
       return {
         candidates: candidates.map((item) => ({
           id: item.id,
           label: item.label,
           duration: item.duration,
+          playing: Boolean(item.playing),
           preferred: item.preferred || item === preferred,
           hasUrl: Boolean(item.url),
           protected: item.protected,
@@ -682,11 +700,9 @@ async function probeAudioFromNetwork(tabId, waitMs = 4500) {
 async function currentPageAudio(tabId, required = false, audioId = null) {
   let inspection;
   try {
-    // Status/list polls must never warm. Warm only when Capture requires a URL.
+    // Always read-only first. Prefer the currently playing element.
+    // Warm only on Capture, once, and only if still no HTTPS URL.
     inspection = await inspectPageAudio(tabId, { warm: false, audioId });
-    if (required && !inspection?.mediaUrl) {
-      inspection = await inspectPageAudio(tabId, { warm: true, audioId });
-    }
     if (required && !inspection?.mediaUrl) {
       const network = await probeAudioFromNetwork(tabId);
       if (network?.mediaUrl) {
@@ -701,6 +717,10 @@ async function currentPageAudio(tabId, required = false, audioId = null) {
           protected: false,
         };
       }
+    }
+    if (required && !inspection?.mediaUrl) {
+      // Last resort: briefly play a paused player once (never loops; skips if already playing).
+      inspection = await inspectPageAudio(tabId, { warm: true, audioId });
     }
   } catch {
     if (required) throw new Error("This page's audio could not be inspected. Open the call and click the extension again.");
@@ -744,7 +764,7 @@ async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
       referer: `${page.origin}/`,
       jobKey: `${captureKey}#attempt=${Date.now()}-${crypto.randomUUID()}`,
       mediaUrl: audio.mediaUrl,
-      mediaMime: audio.mimeType || "",
+      mediaMime: audioMimeForCollector(audio.mediaUrl, audio.mimeType || ""),
       expectedDurationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
     }),
   }));
