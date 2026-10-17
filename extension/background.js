@@ -747,14 +747,16 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
         }, 0);
         const last = nodes.some((node) => window.__lessonCaptureLastAudio === node);
         const title = String(post.title || "").trim();
+        const label = String(post.label || title).trim();
         return {
           id: post.id,
           keys: post.keys || [post.id],
           element: post.element,
           url: null,
           blob: false,
-          label: title || "Untitled audio",
+          label: label || "Untitled audio",
           title,
+          speaker: String(post.speaker || "").trim(),
           fileStem: post.fileStem || null,
           duration: Number.isFinite(post.duration) ? post.duration : null,
           playing: Boolean(post.playing),
@@ -786,7 +788,7 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
             element: retried.element || preferred.element,
             title: String(retried.title).trim(),
             fileStem: retried.fileStem || preferred.fileStem,
-            label: String(retried.title).trim(),
+            label: String(retried.label || retried.title).trim(),
           };
           candidates = candidates.map((item) => item.id === preferred.id ? { ...item, ...preferred } : item);
         }
@@ -796,9 +798,12 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
         const bar = nowPlayingText();
         const barStem = bar.replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, "").trim();
         if (!preferred.title && barStem && globalThis.LessonTitle) {
-          const stem = globalThis.LessonTitle.windowsFileStem(barStem);
+          const titled = globalThis.LessonTitle.spokenFileTitle
+            ? globalThis.LessonTitle.spokenFileTitle(barStem, "now-playing", preferred.speaker)
+            : barStem;
+          const stem = globalThis.LessonTitle.windowsFileStem(titled);
           if (stem) {
-            preferred = { ...preferred, title: barStem, fileStem: stem, label: barStem };
+            preferred = { ...preferred, title: barStem, fileStem: stem, label: titled };
           }
         } else if (preferred.title && barStem && !roughly(preferred.title, barStem)) {
           console.warn("[Lesson Capture] Now-playing title does not match this post.", {
@@ -841,6 +846,7 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
         duration: preferred?.duration ?? null,
         title: preferred?.title || "",
         fileStem: preferred?.fileStem || null,
+        displayTitle: preferred?.label || preferred?.title || "",
         channel,
         site: location.hostname.replace(/^www\./, ""),
         naming: {
@@ -917,7 +923,7 @@ async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
     console.warn("[Lesson Capture] Selector failed: document.title. Refusing to save this audio as \"The Real World\".");
     throw new Error("Could not read a lesson title from this post, so the file was not saved as The Real World.");
   }
-  const displayTitle = audio.title || title;
+  const displayTitle = audio.displayTitle || audio.label || audio.title || title;
   const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

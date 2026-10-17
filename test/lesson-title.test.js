@@ -40,7 +40,9 @@ test("campus fixtures: five title rules, one entry per audio post", () => {
 
   const reprogram = byId(posts, "post-ai-reprogram");
   assert.equal(reprogram.title, "How to Re-program Your Thoughts");
-  assert.equal(reprogram.fileStem, "How to Re-program Your Thoughts");
+  assert.equal(reprogram.speaker, "Pope");
+  assert.equal(reprogram.label, "Pope - How to Re-program Your Thoughts");
+  assert.equal(reprogram.fileStem, "Pope - How to Re-program Your Thoughts");
   assert.equal(reprogram.rule, "event");
   assert.equal(reprogram.playing, true);
   assert.equal(reprogram.crossCheck, "match");
@@ -48,6 +50,7 @@ test("campus fixtures: five title rules, one entry per audio post", () => {
   assert.equal(reprogram.cardSelector, LessonTitle.SELECTORS.messageCard);
 
   assert.equal(byId(posts, "post-ai-change").title, "Change Your Words");
+  assert.equal(byId(posts, "post-ai-change").fileStem, "Pope - Change Your Words");
   assert.equal(byId(posts, "post-ai-change").rule, "event");
   assert.equal(byId(posts, "post-ai-change").playing, false);
   assert.notEqual(byId(posts, "post-ai-change").title, reprogram.title);
@@ -55,23 +58,27 @@ test("campus fixtures: five title rules, one entry per audio post", () => {
   const trading = byId(posts, "post-trading-17");
   assert.equal(trading.title, "Market Mindset Series #17 - The Illusion of Control");
   assert.equal(trading.rule, "todays-lesson");
-  assert.equal(trading.fileStem, trading.title);
+  assert.equal(trading.speaker, "Professor Michael G.");
+  assert.equal(trading.fileStem, "Professor Michael G. - " + trading.title);
   assert.doesNotMatch(trading.title, /33 min|Listen now|Committed|Professor|DAILY/);
 
   const cold = byId(posts, "post-bm-cold");
   assert.equal(cold.title, "Cold Calling Script");
   assert.equal(cold.rule, "dated-lesson");
+  assert.equal(cold.fileStem, "Zjannie - Cold Calling Script");
   assert.doesNotMatch(cold.title, /31\/01|Arno|Zjannie|Business/);
 
   const ecommerce = byId(posts, "post-ecom-meta");
   assert.equal(ecommerce.title, "Meta Is Consistently Inconsistent");
   assert.equal(ecommerce.rule, "single-line");
+  assert.equal(ecommerce.fileStem, "Shuayb - Meta Is Consistently Inconsistent");
   assert.doesNotMatch(ecommerce.title, /@|Students|Shuayb|Ecommerce/);
 
   const empty = byId(posts, "post-ecom-empty");
   assert.equal(empty.title, "Shuayb July 2026");
   assert.equal(empty.rule, "speaker-month-year");
   assert.equal(empty.fileStem, "Shuayb July 2026");
+  assert.equal(empty.label, "Shuayb July 2026");
 
   for (const post of posts) {
     assert.notEqual(post.title, "The Real World");
@@ -110,6 +117,8 @@ test("now-playing bar is a fallback for the playing post only", () => {
   assert.equal(playing.crossCheck, "fallback");
   assert.equal(silent.title, "Shuayb July 2026");
   assert.equal(silent.rule, "speaker-month-year");
+  assert.equal(silent.fileStem, "Shuayb July 2026");
+  assert.equal(playing.fileStem, "Pope - How to Re-program Your Thoughts");
   assert.notEqual(silent.title, playing.title);
 });
 
@@ -434,6 +443,9 @@ test("plain words and daily-lesson titles are kept", () => {
   assert.equal(byId(posts, "post-daily").title, "Build a Daily Lesson");
   assert.equal(byId(posts, "post-noise").title, "Reduce the Noise");
   assert.equal(byId(posts, "post-noise").rule, "labeled-mention");
+  assert.equal(byId(posts, "post-noise").speaker, "Chwuik");
+  assert.equal(byId(posts, "post-noise").fileStem, "Chwuik - Reduce the Noise");
+  assert.equal(byId(posts, "post-daily").fileStem, "Pope - Build a Daily Lesson");
 });
 
 test("dropdown ids stay on the post when the list order changes", () => {
@@ -483,12 +495,14 @@ test("daily-lessons colon titles: one dropdown row per mounted audio post", () =
     assert.equal(post.playing, playing);
     assert.equal(post.cardSelector, LessonTitle.SELECTORS.messageCard);
     assert.doesNotMatch(post.title, /In this lesson|Technical Professor|@/);
+    assert.equal(post.speaker, "Chwuik");
+    assert.equal(post.label, "Chwuik - " + title);
     assert.doesNotMatch(post.fileStem || "", /audio|bootcamp|leaderboard|earth editor|daily-lessons/i);
     assert.doesNotMatch(post.cardText, /bootcamp|leaderboard|EARTH EDITOR/);
   }
   assert.equal(
     byId(posts, "post-vendor").fileStem,
-    "Vendor Lock-In And The Assistants Api Trap",
+    "Chwuik - Vendor Lock-In And The Assistants Api Trap",
   );
   assert.equal(posts.some((post) => post.title === "Fail more"), false);
   assert.equal(posts.some((post) => (post.fileStem || "").toLowerCase() === "audio"), false);
@@ -516,6 +530,91 @@ test("a missing title uses the playing filename, otherwise speaker month year", 
   assert.equal(silent.title, "Chwuik April 2026");
   assert.equal(silent.rule, "speaker-month-year");
   assert.notEqual(silent.fileStem || silent.title, "audio");
+});
+
+test("the teacher, not the poster, prefixes the file and the dropdown label", () => {
+  const { posts } = postsFrom(fixture("speaker-tags.html"));
+  assert.equal(posts.length, 7, "sidebar and channel chrome are not audio rows");
+
+  const certainty = byId(posts, "post-certainty");
+  assert.equal(certainty.title, "Certainty Transfers");
+  assert.equal(certainty.speaker, "Seth H");
+  assert.equal(certainty.label, "Seth H - Certainty Transfers");
+  assert.equal(certainty.fileStem, "Seth H - Certainty Transfers");
+  assert.equal(certainty.duration, 2 * 60 + 4);
+
+  const truth = byId(posts, "post-truth");
+  assert.equal(truth.title, "Truth About AI");
+  assert.equal(truth.speaker, "Andrei N");
+  assert.equal(truth.label, "Andrei N - Truth About AI");
+  assert.equal(truth.fileStem, "Andrei N - Truth About AI");
+  assert.equal(truth.duration, 1 * 60 + 52);
+  assert.doesNotMatch(truth.fileStem, /IIIIIII|🎖️/);
+
+  const aikido = byId(posts, "post-aikido");
+  assert.equal(aikido.title, "Free Email Aikido");
+  assert.equal(aikido.speaker, "Pope");
+  assert.equal(aikido.label, "Pope - Free Email Aikido");
+  assert.equal(aikido.fileStem, "Pope - Free Email Aikido");
+  assert.equal(aikido.duration, 3 * 60 + 59);
+  assert.doesNotMatch(aikido.speaker, /l|🏛/);
+
+  const technical = byId(posts, "post-technical");
+  assert.equal(technical.title, "Retrieval Basics");
+  assert.equal(technical.speaker, "Chwuik");
+  assert.equal(technical.fileStem, "Chwuik - Retrieval Basics");
+
+  const sales = byId(posts, "post-sales");
+  assert.equal(sales.title, "The Close");
+  assert.equal(sales.speaker, "Seth H");
+  assert.equal(sales.fileStem, "Seth H - The Close");
+
+  const daily = byId(posts, "post-daily-chwuik");
+  assert.equal(daily.title, "Reduce the Noise");
+  assert.equal(daily.rule, "labeled-mention");
+  assert.equal(daily.speaker, "Chwuik");
+  assert.equal(daily.label, "Chwuik - Reduce the Noise");
+  assert.equal(daily.fileStem, "Chwuik - Reduce the Noise");
+
+  const quiet = byId(posts, "post-quiet");
+  assert.equal(quiet.title, "Quiet Bench");
+  assert.equal(quiet.speaker, "");
+  assert.equal(quiet.label, "Quiet Bench");
+  assert.equal(quiet.fileStem, "Quiet Bench");
+
+  const richer = LessonTitle.parseLessonTitle({
+    bodyText: "Truth About AI:\nIn this lesson Guidance Professor @Andrei explains why.",
+    author: "IIIIIII",
+    mentions: ["Andrei N"],
+    pageTitle: "The Real World",
+  });
+  assert.equal(richer.title, "Truth About AI");
+  assert.equal(richer.speaker, "Andrei N");
+
+  const junkMonth = LessonTitle.parseLessonTitle({
+    bodyText: "",
+    author: "IIIIIII",
+    timestampText: "01/08/2026",
+    pageTitle: "The Real World",
+  });
+  assert.equal(junkMonth.title, null);
+  assert.equal(junkMonth.speaker, "");
+
+  assert.equal(
+    LessonTitle.spokenFileTitle("Shuayb July 2026", "speaker-month-year", "Shuayb"),
+    "Shuayb July 2026",
+  );
+  assert.equal(
+    LessonTitle.spokenFileTitle("Quiet Bench", "colon-line", "IIIIIII"),
+    "Quiet Bench",
+  );
+  assert.equal(
+    LessonTitle.duplicateFileName("Pope - Free Email Aikido", ["Pope - Free Email Aikido.mp3"], ".mp3"),
+    "Pope - Free Email Aikido (2).mp3",
+  );
+  const longStem = LessonTitle.windowsFileStem(`Seth H - ${"A".repeat(300)}`);
+  assert.ok(longStem.length <= 180);
+  assert.match(longStem, /^Seth H - /);
 });
 
 function argsHead(logged) {
