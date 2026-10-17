@@ -4,26 +4,41 @@
     <title>The Real World</title>
   </head>
   <body>
-    <div data-now-playing>
-      <span data-now-playing-title>How to Re-program Your Thoughts.mp3</span>
+    <div class="relative flex border-b bg-base-300">
+      <p class="truncate">How to Re-program Your Thoughts.mp3</p>
+      <span>#energy-calls</span>
+      <span>04:14 / 55:30</span>
+      <button type="button">1x</button>
     </div>
-    <div class="feed">
-      <article data-message-id="playing-empty">
-        <header>
-          <span data-author>Pope</span>
-          <time datetime="2026-10-10">10/10/2026</time>
-        </header>
-        <div data-message-body></div>
-        <audio data-playing="true" src="https://cdn.example/playing.mp3"></audio>
-      </article>
-      <article data-message-id="silent-empty">
-        <header>
-          <span data-author>Shuayb</span>
-          <time datetime="2026-07-06">07/06/2026</time>
-        </header>
-        <div data-message-body></div>
-        <audio src="https://cdn.example/silent.mp3"></audio>
-      </article>
+    <div id="chatchat-scroller-energy">
+      <div class="chat-message" data-message-id="playing-empty" id="playing-empty">
+        <section data-message-id-content="playing-empty">
+          <div>
+            <span data-user-id="pope"><span class="normal-case">Pope</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">10/10/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"></div></span>
+          <div class="mt-2 flex bg-base-200" data-playing="true">
+            <svg class="cursor-pointer"></svg>
+            <button type="button">1x</button>
+            <div class="text-xs">04:14 / 55:30</div>
+          </div>
+        </section>
+      </div>
+      <div class="chat-message" data-message-id="silent-empty" id="silent-empty">
+        <section data-message-id-content="silent-empty">
+          <div>
+            <span data-user-id="shuayb"><span class="normal-case">Shuayb</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">07/06/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"></div></span>
+          <div class="mt-2 flex bg-base-200">
+            <svg class="cursor-pointer"></svg>
+            <button type="button">1x</button>
+            <div class="text-xs">00:00 / 04:00</div>
+          </div>
+        </section>
+      </div>
     </div>
   </body>
 </html>

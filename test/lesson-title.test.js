@@ -7,9 +7,10 @@ const LessonTitle = require("../extension/lesson-title.js");
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8");
 
+const PLAYER = `<div class="mt-2 flex bg-base-200"><svg class="cursor-pointer"></svg><button type="button">1x</button><div class="text-xs">01:00 / 02:00</div></div>`;
+
 function postsFrom(html) {
   const { document } = parseHTML(html);
-  const audios = [...document.querySelectorAll("audio")];
   const warnings = [];
   const infos = [];
   const originalWarn = console.warn;
@@ -18,7 +19,7 @@ function postsFrom(html) {
   console.info = (...args) => infos.push(args);
   let posts = [];
   try {
-    posts = LessonTitle.describeAudioPosts(audios, document);
+    posts = LessonTitle.describeAudioPosts(document);
   } finally {
     console.warn = originalWarn;
     console.info = originalInfo;
@@ -154,6 +155,64 @@ test("parser rules ignore date lines, mentions, and checklist chrome", () => {
   });
   assert.equal(datedWithNote.title, "Cold Calling Script");
   assert.equal(datedWithNote.rule, "dated-lesson");
+
+  const discipline = LessonTitle.parseLessonTitle({
+    bodyText: "Discipline",
+    pageTitle: "The Real World",
+  });
+  assert.equal(discipline.title, "Discipline");
+  assert.equal(discipline.rule, "single-line");
+
+  const mindset = LessonTitle.parseLessonTitle({
+    bodyText: "Monday Mindset",
+    pageTitle: "The Real World",
+  });
+  assert.equal(mindset.title, "Monday Mindset");
+  assert.equal(mindset.rule, "single-line");
+
+  const daily = LessonTitle.parseLessonTitle({
+    bodyText: "Build a Daily Lesson",
+    pageTitle: "The Real World",
+  });
+  assert.equal(daily.title, "Build a Daily Lesson");
+  assert.equal(daily.rule, "single-line");
+
+  const weekdayChrome = LessonTitle.parseLessonTitle({
+    bodyText: "Wednesday 13 May · DAILY LESSON",
+    author: "Professor Michael G.",
+    timestampText: "05/13/2026",
+    pageTitle: "The Real World",
+  });
+  assert.notEqual(weekdayChrome.title, "Wednesday 13 May · DAILY LESSON");
+
+  const channelName = LessonTitle.parseLessonTitle({
+    bodyText: "#energy-calls\nenergy-calls",
+    pageTitle: "The Real World",
+  });
+  assert.equal(channelName.title, null);
+
+  const reduce = LessonTitle.parseLessonTitle({
+    bodyText: "Daily @Chwuik👽🎖️🛡️🎓⚡️: Reduce the Noise",
+    pageTitle: "The Real World",
+  });
+  assert.equal(reduce.title, "Reduce the Noise");
+  assert.equal(reduce.rule, "labeled-mention");
+
+  const change = LessonTitle.parseLessonTitle({
+    bodyText: "Daily @Chwuik…: You Have To Change For Things to Change",
+    pageTitle: "The Real World",
+  });
+  assert.equal(change.title, "You Have To Change For Things to Change");
+  assert.equal(change.rule, "labeled-mention");
+
+  const emptySpeaker = LessonTitle.parseLessonTitle({
+    bodyText: "",
+    author: "Shuayb",
+    timestampText: "07/06/2026",
+    pageTitle: "The Real World",
+  });
+  assert.equal(emptySpeaker.title, "Shuayb July 2026");
+  assert.equal(emptySpeaker.rule, "speaker-month-year");
 });
 
 test("windows file stems are title-only and duplicates use (2)", () => {
@@ -187,6 +246,9 @@ test("windows file stems are title-only and duplicates use (2)", () => {
     "utf8",
   );
   assert.match(collector, /stem \+ " \(" \+ n \+ "\)" \+ extension/);
+  assert.match(collector, /WindowsMaxPath = 260/);
+  assert.match(collector, /FitStemToMaxPath/);
+  assert.match(collector, /FinishedVideoRoot/);
 });
 
 test("one mounted post does not inherit the app shell or the list", () => {
@@ -198,7 +260,7 @@ test("one mounted post does not inherit the app shell or the list", () => {
       <div class="row">
         <header><span>Shuayb · Ecommerce</span><time datetime="2026-07-06">July 6, 2026</time></header>
         <p>Meta Is Consistently Inconsistent @Students</p>
-        <audio src="https://cdn.example/meta.mp3"></audio>
+        ${PLAYER}
       </div>
     </div>
   </body></html>`);
@@ -212,7 +274,7 @@ test("one mounted post does not inherit the app shell or the list", () => {
       <div class="row">
         <header><span>Shuayb · Ecommerce</span><time datetime="2026-07-06">July 6, 2026</time></header>
         <p>You Only Need To Be Right Once @Students</p>
-        <audio src="https://cdn.example/once.mp3"></audio>
+        ${PLAYER}
       </div>
     </div>
   </body></html>`);
@@ -227,7 +289,7 @@ test("a now-playing class on a page wrapper does not hide the post", () => {
       <article data-message-id="keep">
         <header><span data-author>Pope</span><time datetime="2026-10-10">10/10/2026</time></header>
         <div data-message-body><p>Event: How to Re-program Your Thoughts</p><p>Date: 10th October '26</p></div>
-        <audio data-playing="true" src="https://cdn.example/a.mp3"></audio>
+        <div class="mt-2 flex bg-base-200" data-playing="true"><svg class="cursor-pointer"></svg><button type="button">1x</button><div class="text-xs">04:14 / 55:30</div></div>
       </article>
     </div>
   </body></html>`);
@@ -245,25 +307,158 @@ test("a player inside a shadow root still uses the message card", () => {
         <div data-message-body><p>Event: How to Re-program Your Thoughts</p><p>Date: 10th October '26</p></div>
         <div id="host"></div>
       </article>
-      <article data-message-id="other">
-        <header><span data-author>Pope</span></header>
-        <div data-message-body><p>Event: Change Your Words</p></div>
-        <audio src="https://cdn.example/other.mp3"></audio>
-      </article>
+      <div class="chat-message" data-message-id="other" id="other">
+        <section data-message-id-content="other">
+          <div><span data-user-id="pope"><span class="normal-case">Pope</span></span></div>
+          <span class="custom-break-words"><div class="markdown"><p>Event: Change Your Words</p></div></span>
+          <div class="mt-2 flex bg-base-200"><svg class="cursor-pointer"></svg><button type="button">1x</button><div class="text-xs">01:00 / 02:00</div></div>
+        </section>
+      </div>
     </div>
   </body></html>`);
   const host = document.getElementById("host");
   assert.equal(typeof host.attachShadow, "function");
   const shadow = host.attachShadow({ mode: "open" });
-  const audio = document.createElement("audio");
-  audio.setAttribute("src", "https://cdn.example/shadow.mp3");
-  shadow.appendChild(audio);
-  const others = [...document.querySelectorAll("audio")];
-  const posts = LessonTitle.describeAudioPosts([audio, ...others], document, { log: false });
+  const widget = document.createElement("div");
+  widget.innerHTML = `<svg class="cursor-pointer"></svg><button type="button">1x</button><div class="text-xs">01:00 / 02:00</div>`;
+  shadow.appendChild(widget);
+  const posts = LessonTitle.describeAudioPosts([widget], document, { log: false });
   const shadowed = byId(posts, "post-shadow");
   assert.equal(shadowed.title, "How to Re-program Your Thoughts");
   assert.equal(shadowed.rule, "event");
   assert.equal(byId(posts, "post-other").title, "Change Your Words");
+});
+
+test("one audio post in a channel does not swallow the sidebar", () => {
+  const { posts } = postsFrom(fixture("single-audio-channel.html"));
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].id, "post-only-audio");
+  assert.equal(posts[0].title, "How to Re-program Your Thoughts");
+  assert.equal(posts[0].rule, "event");
+  assert.equal(posts[0].cardSelector, LessonTitle.SELECTORS.messageCard);
+  assert.doesNotMatch(posts[0].cardText, /Change Your Words|leaderboard|energy-calls|ArtCraft/);
+});
+
+test("structural climb stops before a channel-sized ancestor", () => {
+  const swallowed = postsFrom(`<!doctype html><html><head><title>The Real World</title></head><body>
+    <div class="relative flex border-b bg-base-300"><p class="truncate">How to Re-program Your Thoughts.mp3</p></div>
+    <div class="channel">
+      <span>#energy-calls</span>
+      <span>leaderboard</span>
+      <span>announce</span>
+      <p>Event: Change Your Words</p>
+      <p>Event: Keep the First Line</p>
+      <span class="ml-3 cursor-default text-3xs opacity-50">10/10/2026</span>
+      <div class="mt-2 flex bg-base-200" data-playing="true">
+        <svg class="cursor-pointer"></svg>
+        <button type="button">1x</button>
+        <div class="text-xs">04:14 / 55:30</div>
+      </div>
+    </div>
+  </body></html>`);
+  assert.equal(swallowed.posts.length, 1);
+  assert.notEqual(swallowed.posts[0].title, "Change Your Words");
+  assert.equal(swallowed.posts[0].title, "How to Re-program Your Thoughts");
+  assert.ok(swallowed.warnings.some((line) => /channel or sidebar/i.test(line)));
+
+  const wide = postsFrom(`<!doctype html><html><head><title>The Real World</title></head><body>
+    <div class="channel">
+      <nav><a>#energy-calls</a><a>leaderboard</a><span>ArtCraft</span></nav>
+      <div class="row">
+        <header><span>Pope</span><time datetime="2026-10-08">10/08/2026</time></header>
+        <p>Event: Change Your Words</p>
+      </div>
+      <div class="row">
+        <header><span>Pope</span><time datetime="2026-10-10">10/10/2026</time></header>
+        <p>Event: How to Re-program Your Thoughts</p>
+        ${PLAYER}
+      </div>
+    </div>
+  </body></html>`);
+  assert.equal(wide.posts.length, 1);
+  assert.equal(wide.posts[0].title, "How to Re-program Your Thoughts");
+  assert.equal(wide.posts[0].cardSelector, "structural:highest-single-player-ancestor");
+  assert.doesNotMatch(wide.posts[0].cardText, /Change Your Words|leaderboard|ArtCraft|energy-calls/);
+});
+
+test("plain words and daily-lesson titles are kept", () => {
+  const { posts } = postsFrom(`<!doctype html><html><head><title>The Real World</title></head><body>
+    <div id="chatchat-scroller-x">
+      <div class="chat-message" data-message-id="discipline" id="discipline">
+        <section data-message-id-content="discipline">
+          <div>
+            <span data-user-id="a"><span class="normal-case">Pope</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">01/02/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"><p>Discipline</p></div></span>
+          ${PLAYER}
+        </section>
+      </div>
+      <div class="chat-message" data-message-id="mindset" id="mindset">
+        <section data-message-id-content="mindset">
+          <div>
+            <span data-user-id="a"><span class="normal-case">Pope</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">01/03/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"><p>Monday Mindset</p></div></span>
+          ${PLAYER}
+        </section>
+      </div>
+      <div class="chat-message" data-message-id="daily" id="daily">
+        <section data-message-id-content="daily">
+          <div>
+            <span data-user-id="a"><span class="normal-case">Pope</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">01/04/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"><p>Build a Daily Lesson</p></div></span>
+          ${PLAYER}
+        </section>
+      </div>
+      <div class="chat-message" data-message-id="noise" id="noise">
+        <section data-message-id-content="noise">
+          <div>
+            <span data-user-id="c"><span class="normal-case">Chwuik</span></span>
+            <span class="ml-3 cursor-default text-3xs opacity-50">09/11/2026</span>
+          </div>
+          <span class="custom-break-words"><div class="markdown"><p>Daily @Chwuik👽🎖️🛡️🎓⚡️: Reduce the Noise</p></div></span>
+          ${PLAYER}
+        </section>
+      </div>
+    </div>
+  </body></html>`);
+  assert.equal(byId(posts, "post-discipline").title, "Discipline");
+  assert.equal(byId(posts, "post-discipline").rule, "single-line");
+  assert.equal(byId(posts, "post-mindset").title, "Monday Mindset");
+  assert.equal(byId(posts, "post-daily").title, "Build a Daily Lesson");
+  assert.equal(byId(posts, "post-noise").title, "Reduce the Noise");
+  assert.equal(byId(posts, "post-noise").rule, "labeled-mention");
+});
+
+test("dropdown ids stay on the post when the list order changes", () => {
+  const row = (title, author, date) => `<div class="row">
+    <header><span>${author}</span><time datetime="${date}">${date}</time></header>
+    <p>${title}</p>
+    ${PLAYER}
+  </div>`;
+  const page = (first, second) => postsFrom(`<!doctype html><html><head><title>The Real World</title></head><body>
+    <div class="feed">${first}${second}</div>
+  </body></html>`);
+  const discipline = row("Discipline", "Pope", "2026-01-02");
+  const meta = row("Meta Is Consistently Inconsistent", "Shuayb", "2026-07-06");
+  const forward = page(discipline, meta);
+  const backward = page(meta, discipline);
+  for (const result of [forward, backward]) {
+    assert.equal(result.posts.length, 2);
+    for (const post of result.posts) {
+      assert.equal(post.id.includes("post-index"), false);
+      assert.equal(post.id.includes("blob:"), false);
+      assert.equal(post.id.startsWith("url:"), false);
+    }
+  }
+  const idOf = (result, title) => result.posts.find((post) => post.title === title).id;
+  assert.equal(idOf(forward, "Discipline"), idOf(backward, "Discipline"));
+  assert.equal(idOf(forward, "Meta Is Consistently Inconsistent"), idOf(backward, "Meta Is Consistently Inconsistent"));
+  assert.notEqual(idOf(forward, "Discipline"), idOf(forward, "Meta Is Consistently Inconsistent"));
 });
 
 function argsHead(logged) {

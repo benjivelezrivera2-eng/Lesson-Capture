@@ -1,6 +1,6 @@
 <!doctype html>
-<!-- No data-message-* attributes. The card selector is inferred and misses.
-     Titles still have to come from each post, not from the document title. -->
+<!-- No chat-message wrapper. The verified selector misses, so the structural
+     card is used. Titles still come from each post, not the document title. -->
 <html lang="en">
   <head>
     <title>The Real World</title>
@@ -14,7 +14,11 @@
         </header>
         <p>Event: How to Re-program Your Thoughts</p>
         <p>Date: 10th October '26</p>
-        <audio src="https://cdn.example/reprogram.mp3"></audio>
+        <div class="mt-2 flex bg-base-200">
+          <svg class="cursor-pointer"></svg>
+          <button type="button">1x</button>
+          <div class="text-xs">04:14 / 55:30</div>
+        </div>
       </div>
       <div class="row">
         <header>
@@ -22,7 +26,11 @@
           <time datetime="2026-07-06">07/06/2026</time>
         </header>
         <p>Meta Is Consistently Inconsistent @Students</p>
-        <audio src="https://cdn.example/meta.mp3"></audio>
+        <div class="mt-2 flex bg-base-200">
+          <svg class="cursor-pointer"></svg>
+          <button type="button">1x</button>
+          <div class="text-xs">00:00 / 08:00</div>
+        </div>
       </div>
     </div>
   </body>

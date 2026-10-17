@@ -1,15 +1,21 @@
 // Lesson titles for The Real World audio posts.
 //
-// The card is NOT chosen by walking selectors until something matches — that
-// walk was climbing past the message into the document and saving the tab
-// title ("The Real World"). A card is the highest ancestor that still contains
-// only this one audio player. The channel list contains many players, so the
-// walk stops at the post.
+// Verified live on app.jointherealworld.com (AI Automation, daily-lessons):
+//   message wrapper  div.chat-message[data-message-id]  (id equals the message id)
+//   quoted preview   [data-embed-message="true"]        excluded
+//   bubble           section[data-message-id-content]
+//   author           section span[data-user-id] span.normal-case
+//   time             span.ml-3.cursor-default.text-3xs.opacity-50  (MM/DD/YYYY, no <time>)
+//   text             span.custom-break-words div.markdown p
+//   player           custom div: svg.cursor-pointer + "MM:SS / MM:SS" + a 1x button
+//                    (posts have no <audio>; play appends one shared <audio> to <body>)
+//   now-playing bar  div.relative.flex.border-b.bg-base-300 p.truncate  (filename.mp3)
+//   list             div#chatchat-scroller-<channelId>, virtualized rows
 //
-// SELECTORS are inferred from the campus screenshots. They were NOT verified
-// on app.jointherealworld.com. They only name a card and read the author,
-// body, time, and now-playing bar. If one misses, the structural card text is
-// used and a console warning names the selector that failed.
+// The card is the nearest message wrapper around the player, and it must stay
+// inside the single-player ancestor (the virtual row, not the channel).
+// The structural climb is only the fallback when no wrapper matches. Its size
+// and author-count stops keep one mounted post from swallowing the channel.
 (function (root, factory) {
   var api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
@@ -18,65 +24,25 @@
   "use strict";
 
   var SELECTORS = {
-    // Inferred. Confirm on a live channel before relying on a match.
-    messageCard: [
-      "[data-message-id]",
-      "[data-post-id]",
-      "[id^='message-' i]",
-      "[id^='message_' i]",
-      "[id^='chat-message' i]",
-      "[class*='message-card' i]",
-      "[class*='chat-message' i]",
-      "[class*='forum-post' i]",
-      "article",
-      "li",
-      "[role='listitem']",
-    ].join(", "),
-    messageBody: [
-      "[data-message-body]",
-      "[data-message-content]",
-      "[class*='message-content' i]",
-      "[class*='message-body' i]",
-      "[class*='post-body' i]",
-      "[class*='post-content' i]",
-    ].join(", "),
-    author: [
-      "[data-author]",
-      "[data-username]",
-      "[class*='author-name' i]",
-      "[class*='user-name' i]",
-      "[class*='username' i]",
-      "[class*='author' i]",
-    ].join(", "),
-    timestamp: [
-      "time",
-      "[data-timestamp]",
-      "[class*='timestamp' i]",
-      "[class*='message-time' i]",
-    ].join(", "),
-    nowPlaying: [
-      "[data-now-playing]",
-      "[class*='now-playing' i]",
-      "[class*='nowplaying' i]",
-    ].join(", "),
-    nowPlayingTitle: [
-      "[data-now-playing-title]",
-      "[data-now-playing] [class*='title' i]",
-      "[class*='now-playing' i] [class*='title' i]",
-      "[class*='nowplaying' i] [class*='title' i]",
-    ].join(", "),
-    // Removed before the structural card text is read. Inferred chrome, not the lesson.
+    // Verified live. Quoted previews reuse the wrapper and must be excluded.
+    messageCard: 'div.chat-message[data-message-id]:not([data-embed-message="true"])',
+    messageBody: "section[data-message-id-content] span.custom-break-words",
+    author: "section[data-message-id-content] span[data-user-id] span.normal-case",
+    // No <time> element. The stamp is a plain span, text like 09/11/2026.
+    timestamp: "span.ml-3.cursor-default.text-3xs.opacity-50",
+    nowPlaying: "div.relative.flex.border-b.bg-base-300",
+    nowPlayingTitle: "div.relative.flex.border-b.bg-base-300 p.truncate",
     chrome: [
       "header",
       "time",
       "audio",
       "video",
       "button",
-      "[data-author]",
+      "svg",
       "[data-reactions]",
-      "[data-now-playing]",
       "[class*='reaction' i]",
       "[class*='avatar' i]",
+      ".video-js",
     ].join(", "),
   };
 
@@ -89,11 +55,12 @@
     "todays-lesson": 1,
     event: 2,
     "dated-lesson": 3,
-    "single-line": 4,
-    "first-line": 5,
-    "now-playing": 6,
-    "speaker-month-year": 7,
-    none: 8,
+    "labeled-mention": 4,
+    "single-line": 5,
+    "first-line": 6,
+    "now-playing": 7,
+    "speaker-month-year": 8,
+    none: 9,
   };
 
   function collapse(value) {
@@ -102,6 +69,20 @@
 
   function same(a, b) {
     return collapse(a).toLowerCase() === collapse(b).toLowerCase();
+  }
+
+  function roughKey(value) {
+    return collapse(String(value || "").replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, ""))
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function roughlySame(a, b) {
+    var left = roughKey(a);
+    var right = roughKey(b);
+    if (!left || !right) return false;
+    return left === right || left.indexOf(right) !== -1 || right.indexOf(left) !== -1;
   }
 
   function splitLines(value) {
@@ -226,18 +207,192 @@
     return collapse(node.textContent || "").indexOf(title) !== -1;
   }
 
+  function queryCount(node, selector) {
+    if (!node || !node.querySelectorAll) return 0;
+    try {
+      return node.querySelectorAll(selector).length;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function timestampBlockCount(node) {
+    if (!node || !node.querySelectorAll) return 0;
+    var nodes = [];
+    try {
+      nodes = Array.prototype.slice.call(node.querySelectorAll(SELECTORS.timestamp));
+    } catch (error) {
+      return 0;
+    }
+    return nodes.filter(function (el) {
+      var insidePlayer = false;
+      var current = el;
+      while (current && current !== node) {
+        var tag = current.tagName;
+        if (tag === "AUDIO" || tag === "VIDEO") {
+          insidePlayer = true;
+          break;
+        }
+        current = parentOf(current);
+      }
+      if (insidePlayer) return false;
+      return !isPlayerTime(collapse(el.textContent));
+    }).length;
+  }
+
+  function isMessageLike(child) {
+    if (!child || child.nodeType !== 1) return false;
+    var tag = child.tagName;
+    if (tag === "AUDIO" || tag === "VIDEO" || tag === "BUTTON" || tag === "NAV" ||
+      tag === "HEADER" || tag === "TIME" || tag === "SCRIPT" || tag === "STYLE") {
+      return false;
+    }
+    if (safeMatches(child, SELECTORS.messageCard)) return true;
+    var hasAuthor = safeMatches(child, SELECTORS.author) ||
+      Boolean(safeQuery(child, SELECTORS.author)) ||
+      Boolean(child.querySelector && child.querySelector("header"));
+    var hasBody = Boolean(safeQuery(child, SELECTORS.messageBody)) ||
+      Boolean(child.querySelector && child.querySelector("p")) ||
+      timestampBlockCount(child) > 0;
+    return hasAuthor && hasBody;
+  }
+
+  function messageLikeChildCount(node) {
+    var children = node && node.children ? Array.prototype.slice.call(node.children) : [];
+    return children.filter(isMessageLike).length;
+  }
+
+  function tooWide(parent, elements, doc) {
+    if (countPlayers(parent, elements) !== 1) return true;
+    if (looksLikeFeed(parent) || looksLikeAppShell(parent, doc)) return true;
+    if (queryCount(parent, SELECTORS.author) > 1) return true;
+    if (timestampBlockCount(parent) > 1) return true;
+    if (messageLikeChildCount(parent) > 1) return true;
+    if ((parent.textContent || "").length > 1500) return true;
+    return false;
+  }
+
+  function hasPostText(node) {
+    return textLinesOf(node).some(function (line) {
+      if (isPlayerTime(line) || isReactionLine(line)) return false;
+      if (/^(play|pause|mute|1x)$/i.test(line)) return false;
+      if (/^listen to daily lesson$/i.test(line)) return false;
+      if (/^add to checklist$/i.test(line)) return false;
+      return true;
+    });
+  }
+
   function findStructuralCard(element, elements, doc) {
-    var card = element;
+    var chain = [];
     var parent = parentOf(element);
     while (parent && !isBoundary(parent, doc)) {
-      if (countPlayers(parent, elements) !== 1) break;
-      // Virtualized lists often mount one row. Stop at the list even then,
-      // so the card stays the row instead of the document.
-      if (looksLikeFeed(parent) || looksLikeAppShell(parent, doc)) break;
-      card = parent;
+      if (tooWide(parent, elements, doc)) break;
+      chain.push(parent);
       parent = parentOf(parent);
     }
-    return card;
+    // Lowest ancestor that holds the player and the post text. A higher
+    // single-player wrapper is the channel, not the message.
+    for (var i = 0; i < chain.length; i += 1) {
+      if (hasPostText(chain[i])) return chain[i];
+    }
+    return chain.length ? chain[chain.length - 1] : element;
+  }
+
+  function highestSinglePlayer(element, elements, doc) {
+    var node = element;
+    var parent = parentOf(element);
+    while (parent && !isBoundary(parent, doc) && countPlayers(parent, elements) === 1) {
+      node = parent;
+      parent = parentOf(parent);
+    }
+    return node;
+  }
+
+  function closestMessageCard(element, boundary) {
+    var node = element;
+    while (node) {
+      if (safeMatches(node, SELECTORS.messageCard)) return node;
+      if (boundary && node === boundary) break;
+      node = parentOf(node);
+    }
+    return null;
+  }
+
+  // Verified wrapper when it matches. Structural climb only when it does not.
+  function bindCard(element, elements, doc) {
+    var boundary = highestSinglePlayer(element, elements, doc);
+    var selected = closestMessageCard(element, boundary);
+    if (selected) return selected;
+    return findStructuralCard(element, elements, doc);
+  }
+
+  function nodeInside(node, predicate) {
+    var current = node;
+    while (current) {
+      if (predicate(current)) return true;
+      current = parentOf(current);
+    }
+    return false;
+  }
+
+  function isEmbedNode(node) {
+    return Boolean(node && node.getAttribute && node.getAttribute("data-embed-message") === "true");
+  }
+
+  function isNowPlayingNode(node) {
+    return safeMatches(node, SELECTORS.nowPlaying);
+  }
+
+  function isVideoJsNode(node) {
+    return safeMatches(node, ".video-js");
+  }
+
+  function hasSpeedButton(node) {
+    var buttons = [];
+    try {
+      buttons = Array.prototype.slice.call(node.querySelectorAll("button"));
+    } catch (error) {
+      return false;
+    }
+    return buttons.some(function (button) {
+      return /^1x$/i.test(collapse(button.textContent));
+    });
+  }
+
+  function isAudioPlayer(node) {
+    if (!node || !node.querySelector) return false;
+    if (!node.querySelector("svg.cursor-pointer")) return false;
+    if (!hasSpeedButton(node)) return false;
+    return /\d{1,2}:\d{2}\s*\/\s*\d{1,2}:\d{2}/.test(node.textContent || "");
+  }
+
+  function isSharedPlayback(element) {
+    if (!element || element.tagName !== "AUDIO") return false;
+    var parent = parentOf(element);
+    return Boolean(parent && parent.tagName === "BODY");
+  }
+
+  function findAudioPlayers(doc) {
+    if (!doc || !doc.querySelectorAll) return [];
+    var svgs = [];
+    try {
+      svgs = Array.prototype.slice.call(doc.querySelectorAll("svg.cursor-pointer"));
+    } catch (error) {
+      return [];
+    }
+    var players = [];
+    svgs.forEach(function (svg) {
+      if (nodeInside(svg, isEmbedNode) || nodeInside(svg, isNowPlayingNode) || nodeInside(svg, isVideoJsNode)) return;
+      var node = svg;
+      while (node && node !== doc.body && node !== doc.documentElement) {
+        if (isAudioPlayer(node)) {
+          if (players.indexOf(node) === -1) players.push(node);
+          return;
+        }
+        node = parentOf(node);
+      }
+    });
+    return players;
   }
 
   function textLinesOf(node) {
@@ -372,6 +527,22 @@
     return Boolean(lineName && same(lineName, author) && text.length <= author.length + 48);
   }
 
+  function isWeekdayChrome(text) {
+    var match = collapse(text).match(/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b\s*(.*)$/i);
+    if (!match) return false;
+    var rest = collapse(match[2]).replace(/^[·•|]\s*/, "");
+    if (!rest || /^daily lesson$/i.test(rest)) return true;
+    return /^\d{1,2}(?:st|nd|rd|th)?(?:\s+(?:january|february|march|april|may|june|july|august|september|october|november|december))?(?:\s*[·•|]\s*daily lesson)?$/i.test(rest);
+  }
+
+  // Channel names (#energy-calls, energy-calls). A plain word is a title.
+  function isChannelToken(line) {
+    var text = collapse(line);
+    if (/^#[\w-]{2,64}$/.test(text)) return true;
+    if (/^[a-z0-9]+(?:-[a-z0-9]+)+$/i.test(text)) return true;
+    return false;
+  }
+
   function isNoiseLine(line, author) {
     var text = collapse(line);
     if (!text) return true;
@@ -382,13 +553,14 @@
     if (/^add to checklist$/i.test(text)) return true;
     if (/^open$/i.test(text)) return true;
     if (/^introduction$/i.test(text)) return true;
-    if (/daily lesson$/i.test(text)) return true;
-    if (/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(text)) return true;
+    // "Wednesday 13 May · DAILY LESSON" is chrome. "Monday Mindset" and
+    // "Build a Daily Lesson" are titles.
+    if (isWeekdayChrome(text)) return true;
     if (/^today'?s lesson\b/i.test(text)) return true;
     if (/arno-about lesson\s*:?$/i.test(text)) return true;
     if (/^brand new\b/i.test(text) && /lesson\s*:?$/i.test(text)) return true;
     if (/^includes roles?$/i.test(text)) return true;
-    if (/^#?[\w-]{2,64}$/.test(text)) return true;
+    if (isChannelToken(text)) return true;
     return false;
   }
 
@@ -415,7 +587,7 @@
 
   function finish(title, rule, input, bar) {
     var crossCheck = "unused";
-    if (input.isPlaying && bar) crossCheck = same(bar, title) ? "match" : "differ";
+    if (input.isPlaying && bar) crossCheck = roughlySame(bar, title) ? "match" : "differ";
     return { title: title, rule: rule, crossCheck: crossCheck };
   }
 
@@ -450,6 +622,19 @@
       if (acceptable(dated, pageTitle)) return finish(dated, "dated-lesson", source, bar);
     }
 
+    // "Daily @Chwuik👽🎖️: Reduce the Noise" → "Reduce the Noise".
+    var labeledTitle = "";
+    splitLines(raw).some(function (line) {
+      var match = line.match(/^[^@]{1,40}@[^:]+:\s*(.+)$/);
+      if (!match) return false;
+      labeledTitle = match[1];
+      return true;
+    });
+    if (labeledTitle) {
+      var labeled = cleanTitle(labeledTitle);
+      if (acceptable(labeled, pageTitle)) return finish(labeled, "labeled-mention", source, bar);
+    }
+
     var content = splitLines(raw).filter(function (line) { return !isNoiseLine(line, author); });
     if (content.length === 1) {
       var only = cleanTitle(content[0]);
@@ -472,13 +657,14 @@
   function isPlayingMedia(element) {
     if (!element) return false;
     if (element.getAttribute && element.getAttribute("data-playing") === "true") return true;
-    return element.paused === false;
+    if (element.closest && element.closest("[data-playing='true']")) return true;
+    return element.paused === false && element.tagName === "AUDIO";
   }
 
   function isFilenameChrome(text) {
     var lines = splitLines(text).filter(function (line) {
       if (isPlayerTime(line) || isReactionLine(line) || isDateLine(line)) return false;
-      if (/^#?[\w-]{2,64}$/.test(collapse(line))) return false;
+      if (isChannelToken(line)) return false;
       if (/^(close|play|pause|mute|1x)$/i.test(collapse(line))) return false;
       return true;
     });
@@ -488,12 +674,30 @@
     });
   }
 
+  function authorElement(card) {
+    var nodes = [];
+    try {
+      nodes = Array.prototype.slice.call(card.querySelectorAll(SELECTORS.author));
+    } catch (error) {
+      return null;
+    }
+    for (var i = 0; i < nodes.length; i += 1) {
+      var insideBody = nodeInside(nodes[i], function (node) {
+        return node !== card && safeMatches(node, "span.custom-break-words, .markdown");
+      });
+      if (!insideBody) return nodes[i];
+    }
+    return null;
+  }
+
   function readPieces(card) {
-    var authorEl = safeQuery(card, SELECTORS.author);
+    var authorEl = authorElement(card);
     var authorFromSelector = speakerName(authorText(authorEl));
     var headerEl = safeQuery(card, "header");
     var author = authorFromSelector || speakerName(authorText(headerEl));
     var timeEl = safeQuery(card, SELECTORS.timestamp);
+    var timestampMatched = Boolean(timeEl);
+    if (!timeEl && card.querySelector) timeEl = card.querySelector("time");
     var bodyEl = safeQuery(card, SELECTORS.messageBody);
     var bodyText = bodyEl ? textLinesOf(bodyEl).join("\n") : "";
     var cardText = textLinesOf(strippedCard(card)).join("\n");
@@ -502,7 +706,7 @@
       authorMatched: Boolean(authorEl && authorFromSelector),
       timestampISO: timeEl && timeEl.getAttribute ? (timeEl.getAttribute("datetime") || "") : "",
       timestampText: collapse((timeEl && timeEl.textContent) || ""),
-      timestampMatched: Boolean(timeEl),
+      timestampMatched: timestampMatched,
       bodyText: bodyText,
       bodyMatched: Boolean(bodyEl),
       cardText: cardText,
@@ -546,17 +750,95 @@
     return match ? collapse(match[1]) : "";
   }
 
+  function looksLikeChannelText(text) {
+    var raw = String(text || "");
+    var events = raw.match(/Event\s*:/gi);
+    if (events && events.length > 1) return true;
+    var todays = raw.match(/TODAY'?S\s+LESSON/gi);
+    if (todays && todays.length > 1) return true;
+    var dated = raw.match(/\b\d{1,2}\/\d{1,2}\s*[-–—]\s+/g);
+    if (dated && dated.length > 1) return true;
+    var navWords = ["leaderboard", "call archive", "sidebar", "announce", "daily lessons", "information"];
+    var lower = raw.toLowerCase();
+    var hits = navWords.filter(function (word) { return lower.indexOf(word) !== -1; }).length;
+    if (hits >= 2) return true;
+    if (/(^|\s)#[\w-]{2,64}\b/.test(raw) && hits >= 1) return true;
+    return false;
+  }
+
+  function warnChannel(doc, cardSelector) {
+    var key = "channel-text:" + cardSelector;
+    var message = "[Lesson Capture] Card text looks like the channel or sidebar (" + cardSelector + ").";
+    if (!doc) {
+      console.warn(message);
+      return;
+    }
+    var seen = doc.__lessonCaptureWarned || (doc.__lessonCaptureWarned = new Set());
+    if (seen.has(key)) return;
+    seen.add(key);
+    console.warn(message);
+  }
+
+  function hasLessonMarker(text) {
+    var raw = String(text || "");
+    if (/Event\s*:/i.test(raw)) return true;
+    if (/TODAY'?S\s+LESSON/i.test(raw)) return true;
+    if (/\b\d{1,2}\/\d{1,2}\s*[-–—]\s+/.test(raw)) return true;
+    if (/@[\p{L}\p{N}_]/u.test(raw)) return true;
+    if (/arno-about/i.test(raw)) return true;
+    return false;
+  }
+
+  function hasClock(text) {
+    return splitLines(text).some(isPlayerTime);
+  }
+
+  function isNowPlayingBar(card, pieces) {
+    if (safeMatches(card, SELECTORS.nowPlaying)) return true;
+    var text = [pieces.cardText, pieces.bodyText].filter(Boolean).join("\n");
+    if (isFilenameChrome(text)) return true;
+    if (pieces.author || hasLessonMarker(text) || !hasClock(text)) return false;
+    if (/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)\b/i.test(text)) return true;
+    return splitLines(text).some(isChannelToken);
+  }
+
+  function djb2(value) {
+    var hash = 5381;
+    var text = String(value || "");
+    for (var i = 0; i < text.length; i += 1) {
+      hash = ((hash << 5) + hash) + text.charCodeAt(i);
+      hash = hash >>> 0;
+    }
+    return hash.toString(16);
+  }
+
+  function pushKey(keys, value) {
+    if (value && keys.indexOf(value) === -1) keys.push(value);
+  }
+
   function describeAudioPosts(elements, doc, options) {
     var settings = options || {};
+    var documentRef = doc;
+    var extras = elements;
+    if (elements && (elements.nodeType === 9 || elements.documentElement)) {
+      documentRef = elements;
+      settings = doc || {};
+      extras = [];
+    }
     var log = settings.log !== false;
-    var list = Array.isArray(elements) ? elements.filter(Boolean) : [];
-    var pageTitle = doc && doc.title ? doc.title : "";
+    var list = findAudioPlayers(documentRef);
+    (Array.isArray(extras) ? extras : []).forEach(function (element) {
+      if (!element || list.indexOf(element) !== -1) return;
+      if (isSharedPlayback(element) || nodeInside(element, isVideoJsNode) || nodeInside(element, isEmbedNode)) return;
+      list.push(element);
+    });
+    var pageTitle = documentRef && documentRef.title ? documentRef.title : "";
     var groups = [];
 
     list.forEach(function (element) {
-      // Bound the card by player count, not by a now-playing class on an
-      // ancestor. A class match high in the page would hide every post.
-      var card = findStructuralCard(element, list, doc);
+      // Nearest verified wrapper, inside the single-player ancestor.
+      // Structural climb only when that wrapper is absent.
+      var card = bindCard(element, list, documentRef);
       var group = groups.filter(function (item) { return item.card === card; })[0];
       if (!group) {
         group = { card: card, elements: [] };
@@ -569,10 +851,10 @@
     var pending = [];
     groups.forEach(function (group) {
       var pieces = readPieces(group.card);
-      // A now-playing bar is a one-player card whose text is only a file name.
-      // Do not drop a post just because an ancestor's class contains "now-playing".
-      var filenameCard = isFilenameChrome(pieces.cardText) || isFilenameChrome(pieces.bodyText);
-      if (filenameCard) {
+      // The bar is a cross-check, including when it shows a channel and a clock
+      // next to the file name. A now-playing class on a distant ancestor does
+      // not hide the post: only this card is tested.
+      if (isNowPlayingBar(group.card, pieces)) {
         harvested = harvested || harvestFilename(pieces.cardText) || harvestFilename(pieces.bodyText);
         return;
       }
@@ -580,19 +862,19 @@
     });
 
     var barFromSelector = "";
-    var barEl = safeQuery(doc, SELECTORS.nowPlayingTitle);
+    var barEl = safeQuery(documentRef, SELECTORS.nowPlayingTitle);
     if (barEl) barFromSelector = collapse(barEl.textContent);
     if (!barFromSelector) {
-      var barRoot = safeQuery(doc, SELECTORS.nowPlaying);
+      var barRoot = safeQuery(documentRef, SELECTORS.nowPlaying);
       if (barRoot) barFromSelector = harvestFilename(barRoot.textContent);
     }
     var nowPlayingTitle = barFromSelector || harvested;
     var somethingPlaying = pending.some(function (entry) {
       return entry.group.elements.some(isPlayingMedia);
     });
-    if (log && somethingPlaying && !nowPlayingTitle) warnOnce(doc, SELECTORS.nowPlayingTitle);
+    if (log && somethingPlaying && !nowPlayingTitle) warnOnce(documentRef, SELECTORS.nowPlayingTitle);
 
-    var posts = pending.map(function (entry, index) {
+    var posts = pending.map(function (entry) {
       var pieces = entry.pieces;
       var playing = entry.group.elements.some(isPlayingMedia);
       var chosen = chooseParse(pieces, {
@@ -603,15 +885,48 @@
       });
       var selectorMatched = safeMatches(entry.group.card, SELECTORS.messageCard);
       var cardSelector = selectorMatched ? SELECTORS.messageCard : "structural:highest-single-player-ancestor";
-      if (log && !selectorMatched) warnOnce(doc, SELECTORS.messageCard);
-      if (log && !chosen.usedBodySelector) warnOnce(doc, SELECTORS.messageBody);
-      if (log && !pieces.authorMatched) warnOnce(doc, SELECTORS.author);
-      if (log && !pieces.timestampMatched) warnOnce(doc, SELECTORS.timestamp);
-      if (log && !chosen.parsed.title) warnOnce(doc, "document.title");
-      var key = messageKey(entry.group.card);
+      var channelLike = looksLikeChannelText(pieces.cardText) || looksLikeChannelText(pieces.bodyText);
+      if (channelLike) {
+        if (log) warnChannel(documentRef, cardSelector);
+        var fallbackPieces = {
+          author: pieces.author,
+          authorMatched: pieces.authorMatched,
+          timestampISO: pieces.timestampISO,
+          timestampText: pieces.timestampText,
+          timestampMatched: pieces.timestampMatched,
+          bodyText: "",
+          bodyMatched: false,
+          cardText: "",
+        };
+        chosen = chooseParse(fallbackPieces, {
+          nowPlayingTitle: nowPlayingTitle,
+          isPlaying: playing,
+          pageTitle: pageTitle,
+          now: settings.now,
+        });
+        pieces = fallbackPieces;
+      }
+      if (log && !selectorMatched) warnOnce(documentRef, SELECTORS.messageCard);
+      if (log && !chosen.usedBodySelector) warnOnce(documentRef, SELECTORS.messageBody);
+      if (log && !pieces.authorMatched) warnOnce(documentRef, SELECTORS.author);
+      if (log && !pieces.timestampMatched) warnOnce(documentRef, SELECTORS.timestamp);
+      if (log && !chosen.parsed.title) warnOnce(documentRef, "document.title");
+      var messageId = messageKey(entry.group.card);
+      // Message id when the wrapper has one. Otherwise author + timestamp +
+      // title. The audio URL is missing until play, and signed URLs rotate.
+      var metaKey = "meta:" + djb2([
+        pieces.author || "",
+        pieces.timestampISO || pieces.timestampText || "",
+        chosen.parsed.title || "",
+      ].join("\n"));
+      var id = messageId ? "post-" + messageId : metaKey;
+      var keys = [];
+      pushKey(keys, id);
+      pushKey(keys, metaKey);
       return {
-        id: key ? "post-" + key : "post-index-" + index,
-        messageId: key,
+        id: id,
+        keys: keys,
+        messageId: messageId,
         element: primaryElement(entry.group.elements),
         elements: entry.group.elements,
         title: chosen.parsed.title,
@@ -628,8 +943,8 @@
       var signature = posts.map(function (post) {
         return [post.id, post.title, post.rule, post.cardSelector].join("\u0001");
       }).join("\u0002");
-      if (doc.__lessonCaptureTitleLog !== signature) {
-        doc.__lessonCaptureTitleLog = signature;
+      if (documentRef.__lessonCaptureTitleLog !== signature) {
+        documentRef.__lessonCaptureTitleLog = signature;
         posts.forEach(function (post) {
           console.info("[Lesson Capture] audio player", {
             cardSelector: post.cardSelector,
@@ -648,6 +963,8 @@
     SELECTORS: SELECTORS,
     parseLessonTitle: parseLessonTitle,
     describeAudioPosts: describeAudioPosts,
+    findAudioPlayers: findAudioPlayers,
+    roughlySame: roughlySame,
     windowsFileStem: windowsFileStem,
     duplicateFileName: duplicateFileName,
   };
