@@ -686,6 +686,44 @@ test("the audio picker is an in-panel list with a vertical max height", () => {
   assert.match(list[0], /width:\s*100%/);
 });
 
+test("mounted lessons accumulate by message id while the panel stays on a channel", () => {
+  const { mergeAudioCatalog } = require("../extension/audio-catalog.js");
+  const context = { tabId: 7, channel: "daily-lessons" };
+  const first = mergeAudioCatalog(null, [
+    { id: "post-c", label: "C", scrollTop: 1400, playing: false },
+    { id: "post-d", label: "D", scrollTop: 1520, playing: true },
+  ], context);
+  assert.deepEqual(first.items.map((item) => item.id), ["post-c", "post-d"]);
+  assert.equal(first.items.length, 2);
+
+  const older = mergeAudioCatalog(first, [
+    { id: "post-a", label: "A", scrollTop: 200, playing: false },
+    { id: "post-b", label: "B", scrollTop: 320, playing: true },
+  ], context);
+  assert.deepEqual(older.items.map((item) => item.id), ["post-a", "post-b", "post-c", "post-d"]);
+  assert.equal(older.items.find((item) => item.id === "post-c").mounted, false);
+  assert.equal(older.items.find((item) => item.id === "post-c").playing, false);
+  assert.equal(older.items.find((item) => item.id === "post-b").playing, true);
+
+  const duplicate = mergeAudioCatalog(older, [
+    { id: "post-b", label: "B", scrollTop: 320, playing: true },
+  ], context);
+  assert.equal(duplicate.items.filter((item) => item.id === "post-b").length, 1);
+  assert.equal(duplicate.items.length, 4);
+
+  const otherChannel = mergeAudioCatalog(duplicate, [
+    { id: "post-z", label: "Z", scrollTop: 10, playing: false },
+  ], { tabId: 7, channel: "wins" });
+  assert.deepEqual(otherChannel.items.map((item) => item.id), ["post-z"]);
+});
+
+test("virtual rows remember the offset used to scroll a lesson back", () => {
+  const { posts } = postsFrom(fixture("speaker-tags.html"));
+  assert.equal(byId(posts, "post-certainty").scrollTop, 0);
+  assert.equal(byId(posts, "post-truth").scrollTop, 120);
+  assert.equal(byId(posts, "post-aikido").scrollTop, 240);
+});
+
 function argsHead(logged) {
   assert.ok(logged, "missing debug log");
   return logged[0];

@@ -907,6 +907,17 @@
     return card.getAttribute("data-message-id") || card.getAttribute("data-post-id") || "";
   }
 
+  function virtualRowTop(element) {
+    var node = element;
+    while (node && node.parentElement) {
+      var positioned = node.style && node.style.position === "absolute";
+      var top = positioned ? parseFloat(node.style.top) : NaN;
+      if (Number.isFinite(top)) return top;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
   function primaryElement(elements) {
     for (var i = 0; i < elements.length; i += 1) {
       if (isPlayingMedia(elements[i])) return elements[i];
@@ -1130,6 +1141,7 @@
         cardSelector: cardSelector,
         cardText: String(chosen.text || "").slice(0, 500),
         playing: playing,
+        scrollTop: virtualRowTop(entry.group.card),
       };
     });
 

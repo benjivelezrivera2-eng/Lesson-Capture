@@ -25,7 +25,11 @@ const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" width="16" heig
 let captureMode = "video";
 let audioCandidates = [];
 let selectedAudioId = "";
+let audioCatalog = { tabId: null, channel: "", items: [] };
 let lastAudioListAt = 0;
+const mergeAudioCatalog = globalThis.AudioCatalog
+  ? globalThis.AudioCatalog.mergeAudioCatalog
+  : (state, incoming) => ({ tabId: state?.tabId ?? null, channel: state?.channel || "", items: incoming || [] });
 let shownJobId = null;
 let historyWrite = Promise.resolve();
 
@@ -168,6 +172,8 @@ function renderAudioPick(candidates, selectedId) {
     audioPickWrap.hidden = true;
     return;
   }
+  const caption = audioPickWrap.querySelector("span");
+  if (caption) caption.textContent = `Which audio (${audioCandidates.length})`;
   const wasOpen = Boolean(options && !options.hidden);
   const previous = selectedId || selectedAudioId;
   const preferred = audioCandidates.find((item) => sameAudio(item, previous))
@@ -213,7 +219,11 @@ async function refreshAudioCandidates(force = false) {
       type: "LESSON_AUDIO_LIST", tabId: tab.id,
     });
     lastAudioListAt = Date.now();
-    renderAudioPick(result?.candidates || [], result?.preferredId);
+    audioCatalog = mergeAudioCatalog(audioCatalog, result?.candidates || [], {
+      tabId: tab?.id ?? null,
+      channel: result?.channel || "",
+    });
+    renderAudioPick(audioCatalog.items, selectedAudioId || result?.preferredId);
   } catch {
     renderAudioPick([]);
   }
@@ -351,11 +361,13 @@ async function refresh() {
 
 start.addEventListener("click", async () => {
   const tab = await activeTab();
+  const selectedAudio = audioCandidates.find((item) => item.id === selectedAudioId);
   const payload = captureMode === "audio"
     ? {
       type: "LESSON_AUDIO_DOWNLOAD_START",
       tabId: tab.id,
       audioId: !audioPickWrap?.hidden ? selectedAudioId : null,
+      scrollTop: Number.isFinite(Number(selectedAudio?.scrollTop)) ? Number(selectedAudio.scrollTop) : null,
     }
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);

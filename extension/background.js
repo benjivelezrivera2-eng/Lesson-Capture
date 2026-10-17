@@ -598,7 +598,7 @@ async function namesForMedia(tab, media) {
 // the download request body and never written to persisted extension state.
 // warm=true may briefly play a paused player once on Capture only — never from
 // status/list polls (those stuttered the call every ~1s).
-async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = {}) {
+async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false, scrollTop = null } = {}) {
   // Isolated world. Content scripts do not reinject until the tab reloads,
   // so load the parser on each inspect. A miss is logged; the page title is not used.
   await chrome.scripting.executeScript({
@@ -609,7 +609,11 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
   });
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    args: [{ audioId: audioId || null, resolveUrl: Boolean(resolveUrl) }],
+    args: [{
+      audioId: audioId || null,
+      resolveUrl: Boolean(resolveUrl),
+      scrollTop: Number.isFinite(Number(scrollTop)) ? Number(scrollTop) : null,
+    }],
     func: async (options) => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const strictAudioUrl = (value) => {
@@ -736,57 +740,73 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
       if (!globalThis.LessonTitle) {
         console.warn("[Lesson Capture] Selector failed: lesson-title.js");
       }
-      // One row per message. The shared body <audio> is not its own row, and
-      // its src is not attached until this post's play control changes it.
-      const described = describePosts(true);
-      const posts = globalThis.LessonTitle ? described : [...document.querySelectorAll("div.chat-message[data-message-id]")]
-        .filter((card) => card.getAttribute("data-embed-message") !== "true")
-        .map((card) => {
-          const messageId = card.getAttribute("data-message-id");
-          return {
-            id: `post-${messageId}`,
-            keys: [`post-${messageId}`],
-            element: card,
-            elements: [card],
-            title: "",
-            fileStem: null,
-            playing: false,
-            cardSelector: "lesson-title.js",
-          };
-        });
       const matchesId = (item) => item.id === options.audioId ||
         (Array.isArray(item.keys) && item.keys.includes(options.audioId));
-      let candidates = posts.map((post) => {
-        const nodes = post.elements?.length ? post.elements : [post.element];
-        const playedAt = nodes.reduce((max, node) => {
-          const value = Number(node.dataset?.lessonCapturePlayedAt || 0);
-          return value > max ? value : max;
-        }, 0);
-        const last = nodes.some((node) => window.__lessonCaptureLastAudio === node);
-        const title = String(post.title || "").trim();
-        const label = String(post.label || title).trim();
-        return {
-          id: post.id,
-          keys: post.keys || [post.id],
-          element: post.element,
-          url: null,
-          blob: false,
-          label: label || "Untitled audio",
-          title,
-          speaker: String(post.speaker || "").trim(),
-          fileStem: post.fileStem || null,
-          duration: Number.isFinite(post.duration) ? post.duration : null,
-          playing: Boolean(post.playing),
-          playedAt,
-          preferred: last || playedAt > 0,
-          protected: false,
-          cardSelector: post.cardSelector || "",
-        };
-      });
+      // One row per message. The shared body <audio> is not its own row, and
+      // its src is not attached until this post's play control changes it.
+      const collectCandidates = (log) => {
+        elements = globalThis.LessonTitle ? globalThis.LessonTitle.findAudioPlayers(document) : elements;
+        const described = describePosts(log);
+        const posts = globalThis.LessonTitle ? described : [...document.querySelectorAll("div.chat-message[data-message-id]")]
+          .filter((card) => card.getAttribute("data-embed-message") !== "true")
+          .map((card) => {
+            const messageId = card.getAttribute("data-message-id");
+            return {
+              id: `post-${messageId}`,
+              keys: [`post-${messageId}`],
+              element: card,
+              elements: [card],
+              title: "",
+              fileStem: null,
+              playing: false,
+              cardSelector: "lesson-title.js",
+            };
+          });
+        return posts.map((post) => {
+          const nodes = post.elements?.length ? post.elements : [post.element];
+          const playedAt = nodes.reduce((max, node) => {
+            const value = Number(node.dataset?.lessonCapturePlayedAt || 0);
+            return value > max ? value : max;
+          }, 0);
+          const last = nodes.some((node) => window.__lessonCaptureLastAudio === node);
+          const title = String(post.title || "").trim();
+          const label = String(post.label || title).trim();
+          const top = Number(post.scrollTop);
+          return {
+            id: post.id,
+            keys: post.keys || [post.id],
+            element: post.element,
+            url: null,
+            blob: false,
+            label: label || "Untitled audio",
+            title,
+            speaker: String(post.speaker || "").trim(),
+            fileStem: post.fileStem || null,
+            duration: Number.isFinite(post.duration) ? post.duration : null,
+            playing: Boolean(post.playing),
+            playedAt,
+            preferred: last || playedAt > 0,
+            protected: false,
+            cardSelector: post.cardSelector || "",
+            scrollTop: Number.isFinite(top) ? top : null,
+            mounted: true,
+          };
+        });
+      };
+      let candidates = collectCandidates(true);
       let preferred = null;
       let error = null;
       if (options.audioId) {
         preferred = candidates.find(matchesId) || null;
+        if (!preferred && options.resolveUrl && Number.isFinite(options.scrollTop)) {
+          const scroller = document.querySelector("[id^='chatchat-scroller-']");
+          if (scroller) {
+            scroller.scrollTop = Math.max(0, Number(options.scrollTop) - 80);
+            await delay(600);
+            candidates = collectCandidates(false);
+            preferred = candidates.find(matchesId) || null;
+          }
+        }
         if (!preferred) error = "That post isn't loaded anymore, scroll to it and pick again";
       } else {
         preferred = candidates.find((item) => item.playing)
@@ -855,6 +875,8 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
           title: item.title,
           fileStem: item.fileStem,
           duration: item.duration,
+          scrollTop: Number.isFinite(item.scrollTop) ? item.scrollTop : null,
+          mounted: item.mounted !== false,
           playing: Boolean(item.playing),
           preferred: Boolean(preferred && item.id === preferred.id),
           hasUrl: Boolean(item.url),
@@ -894,18 +916,19 @@ async function listPageAudio(tabId) {
     return {
       candidates: inspection?.candidates || [],
       preferredId: inspection?.preferredId || null,
+      channel: inspection?.channel || "",
     };
   } catch {
-    return { candidates: [], preferredId: null };
+    return { candidates: [], preferredId: null, channel: "" };
   }
 }
 
-async function currentPageAudio(tabId, required = false, audioId = null) {
+async function currentPageAudio(tabId, required = false, audioId = null, scrollTop = null) {
   let inspection;
   try {
     // Capture clicks the picked post's play control and reads body > audio.src.
     // Listing the dropdown does not. There is no network-log fallback.
-    inspection = await inspectPageAudio(tabId, { audioId, resolveUrl: required });
+    inspection = await inspectPageAudio(tabId, { audioId, resolveUrl: required, scrollTop });
   } catch {
     if (required) throw new Error("This page's audio could not be inspected. Open the call and click the extension again.");
     return null;
@@ -977,8 +1000,8 @@ async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
   return { active: true, status: download.status };
 }
 
-async function startAudioDownload(tab, audioId = null) {
-  const audio = await currentPageAudio(tab.id, true, audioId);
+async function startAudioDownload(tab, audioId = null, scrollTop = null) {
+  const audio = await currentPageAudio(tab.id, true, audioId, scrollTop);
   const captureKey = await audioCaptureKey(tab, audio);
   if (startingDirectDownloads.has(captureKey)) return { active: true, status: "already queued" };
   startingDirectDownloads.add(captureKey);
@@ -996,7 +1019,7 @@ async function startAudioDownload(tab, audioId = null) {
       startingDirectDownloads.add(`${captureKey}#retry`);
       try {
         await delay(800);
-        const again = await currentPageAudio(tab.id, true, audioId);
+        const again = await currentPageAudio(tab.id, true, audioId, scrollTop);
         return await submitAudioJob(tab, again, captureKey, 1);
       } catch (retryError) {
         authorizationFailures.set(captureKey, retryError.message || "The download could not start.");
@@ -1674,7 +1697,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "LESSON_AUDIO_DOWNLOAD_START") {
     chrome.tabs.get(message.tabId)
-      .then((tab) => startAudioDownload(tab, message.audioId || null))
+      .then((tab) => startAudioDownload(tab, message.audioId || null, message.scrollTop))
       .then(sendResponse)
       .catch((error) => sendResponse({ error: error.message }));
     return true;
