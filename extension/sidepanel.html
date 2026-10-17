@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body class="sidepanel" data-theme="dark">
+    <header class="top">
+      <div>
+        <p class="eyebrow">Local archive</p>
+        <h1>Lesson Capture</h1>
+      </div>
+      <button type="button" id="theme" class="theme-toggle" aria-label="Switch theme">Light</button>
+    </header>
+    <div class="mode-toggle" role="group" aria-label="Capture mode">
+      <button type="button" id="mode-audio" class="mode-btn" data-mode="audio" aria-pressed="false">Audio</button>
+      <button type="button" id="mode-video" class="mode-btn is-active" data-mode="video" aria-pressed="true">Video</button>
+    </div>
+    <p id="status">Checking local processor…</p>
+    <label id="audio-pick-wrap" class="audio-pick" hidden>
+      <span>Audio on this page</span>
+      <select id="audio-pick"></select>
+    </label>
+    <div id="running" hidden>
+      <div id="progress" class="progress-card">
+        <p id="progress-title"></p>
+        <div id="bar"><div id="fill"></div></div>
+        <p id="progress-text"></p>
+      </div>
+      <div class="running-actions">
+        <button type="button" id="stop">Stop this one</button>
+        <button type="button" id="stop-all">Stop all</button>
+        <p id="summary" aria-live="polite"></p>
+      </div>
+    </div>
+    <button id="start">Capture this video</button>
+    <section class="history" aria-live="polite">
+      <div class="history-head">
+        <h2 id="history-label">Video</h2>
+        <span id="history-count">0</span>
+      </div>
+      <p id="history-empty">No video captures yet.</p>
+      <ul id="history" hidden></ul>
+      <button type="button" id="clear-history" hidden>Clear history</button>
+    </section>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

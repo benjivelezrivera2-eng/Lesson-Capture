@@ -6,6 +6,15 @@ function findPlayers() {
   return [...document.querySelectorAll("video")];
 }
 
+// Remember which media the user most recently started. Capture uses that when
+// a channel page has several inline players (audio or audio-like video tags).
+document.addEventListener("play", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLMediaElement)) return;
+  target.dataset.lessonCapturePlayedAt = String(Date.now());
+  window.__lessonCaptureLastAudio = target;
+}, true);
+
 function currentCloudflareVideoId() {
   const player = findPlayers().find((candidate) => /^[a-f0-9]{32}$/i.test(candidate.id));
   // TRW renders its active Cloudflare Stream UID as the main <video> id. The

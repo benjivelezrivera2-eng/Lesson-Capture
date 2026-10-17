@@ -24,6 +24,7 @@ public static class LessonCaptureCollector
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
     private static readonly ConcurrentDictionary<string, CaptureSession> Sessions = new ConcurrentDictionary<string, CaptureSession>();
     private static readonly ConcurrentDictionary<string, DownloadSession> Downloads = new ConcurrentDictionary<string, DownloadSession>();
+    private static readonly object OutputNameLock = new object();
     private static readonly int Port = ResolvePort();
     private static readonly string CaptureRoot = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -60,10 +61,13 @@ public static class LessonCaptureCollector
         public string Title;
         public string LessonUrl;
         public string JobKey;
+        public string Kind;
         public string OutputFile;
         public string Status;
         public string Error;
+        public string Note;
         public string Phase;
+        public double? ExpectedDurationSeconds;
         public int SegmentsDone;
         public int SegmentsTotal;
         public long BytesDownloaded;
@@ -81,6 +85,9 @@ public static class LessonCaptureCollector
         // that so MaxParallelSegments workers can actually fetch at once across
         // the same number of concurrent lesson downloads the extension allows.
         ServicePointManager.DefaultConnectionLimit = MaxParallelSegments * 10;
+        // .NET Framework 4.x defaults omit TLS 1.2 on some hosts; modern CDNs
+        // require it for direct audio/segment downloads.
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
         Directory.CreateDirectory(CaptureRoot);
         Directory.CreateDirectory(FinishedVideoRoot);
         using (var listener = new HttpListener())
@@ -175,8 +182,20 @@ public static class LessonCaptureCollector
     {
         var payload = ReadJson(context.Request);
         var mediaUrl = Text(payload, "mediaUrl", Text(payload, "manifestUrl", ""));
+        var kind = Text(payload, "kind", "video").Trim().ToLowerInvariant();
+        if (kind != "audio") kind = "video";
         Uri media;
-        if (!IsPublicMediaUrl(mediaUrl, out media))
+        if (kind == "audio")
+        {
+            // Call-archive CDNs often serve extensionless HTTPS URLs. Accept any
+            // public HTTPS URL for audio; VerifyAudio still requires an audio stream.
+            if (!IsPublicHttpsUrl(mediaUrl, out media))
+            {
+                Respond(context, HttpStatusCode.BadRequest, new { error = "An accessible public HTTPS audio file or stream URL is required." });
+                return;
+            }
+        }
+        else if (!IsPublicMediaUrl(mediaUrl, out media))
         {
             Respond(context, HttpStatusCode.BadRequest, new { error = "An accessible public HTTPS MP4 or HLS URL is required." });
             return;
@@ -207,15 +226,24 @@ public static class LessonCaptureCollector
                 return;
             }
         }
-        var output = Path.Combine(FinishedVideoRoot, OutputName(new CaptureSession { Id = id, Title = title, StartedAt = DateTime.UtcNow }));
-        var download = new DownloadSession {
-            Id = id, Title = title, LessonUrl = lessonUrl, JobKey = jobKey,
-            OutputFile = output, Status = "downloading", Phase = "starting"
-        };
-        Downloads[id] = download;
-        ThreadPool.QueueUserWorkItem(_ => DownloadManifest(download, mediaUrl, page.GetLeftPart(UriPartial.Authority) + "/"));
+        var extension = kind == "audio" ? ".mp3" : ".mp4";
+        DownloadSession download;
+        lock (OutputNameLock)
+        {
+            var output = Path.Combine(FinishedVideoRoot, OutputName(new CaptureSession { Id = id, Title = title, StartedAt = DateTime.UtcNow }, extension));
+            download = new DownloadSession {
+                Id = id, Title = title, LessonUrl = lessonUrl, JobKey = jobKey, Kind = kind,
+                OutputFile = output, Status = "downloading", Phase = "starting",
+                ExpectedDurationSeconds = Number(payload, "expectedDurationSeconds")
+            };
+            Downloads[id] = download;
+        }
+        if (kind == "audio")
+            ThreadPool.QueueUserWorkItem(_ => DownloadAudio(download, mediaUrl, page.GetLeftPart(UriPartial.Authority) + "/"));
+        else
+            ThreadPool.QueueUserWorkItem(_ => DownloadManifest(download, mediaUrl, page.GetLeftPart(UriPartial.Authority) + "/"));
         // The signed manifest URL is intentionally never written to disk.
-        Respond(context, HttpStatusCode.Accepted, new { id = id, status = download.Status, outputFile = output });
+        Respond(context, HttpStatusCode.Accepted, new { id = id, status = download.Status, outputFile = download.OutputFile });
     }
 
     private static void GetDownload(HttpListenerContext context, string id)
@@ -232,6 +260,7 @@ public static class LessonCaptureCollector
             status = download.Status,
             outputFile = download.OutputFile,
             error = download.Error,
+            note = download.Note,
             phase = download.Phase,
             segmentsDone = download.SegmentsDone,
             segmentsTotal = download.SegmentsTotal,
@@ -402,6 +431,111 @@ public static class LessonCaptureCollector
         }
     }
 
+    private static void DownloadAudio(DownloadSession download, string mediaUrl, string referer)
+    {
+        var workDir = Path.Combine(CaptureRoot, "downloads", download.Id);
+        var sourceExt = GuessAudioExtension(mediaUrl);
+        var stagingSource = Path.Combine(workDir, "source" + sourceExt);
+        var stagingMp3 = download.OutputFile + ".partial.mp3";
+        var isStream = mediaUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            mediaUrl.IndexOf(".mpd", StringComparison.OrdinalIgnoreCase) >= 0;
+        string keepOriginal = null;
+        try
+        {
+            Directory.CreateDirectory(workDir);
+            Directory.CreateDirectory(FinishedVideoRoot);
+            using (File.Create(stagingMp3)) { }
+            download.Phase = "downloading";
+            ThrowIfCancelled(download);
+            if (!isStream)
+            {
+                FetchToFile(mediaUrl, referer, stagingSource);
+                download.BytesDownloaded = new FileInfo(stagingSource).Length;
+                if (string.Equals(sourceExt, ".mp3", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Copy(stagingSource, stagingMp3, true);
+                }
+                else
+                {
+                    try
+                    {
+                        download.Phase = "remuxing";
+                        RunFfmpegAudio(stagingSource, referer, stagingMp3);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        keepOriginal = stagingSource;
+                    }
+                }
+            }
+            else
+            {
+                // Audio-only HLS/DASH: ffmpeg reads the playlist and writes MP3.
+                // Do not save the playlist text as a fallback "original".
+                download.Phase = "downloading";
+                RunFfmpegAudio(mediaUrl, referer, stagingMp3);
+            }
+            ThrowIfCancelled(download);
+            download.Phase = "verifying";
+            string verifiedPath;
+            if (keepOriginal != null)
+            {
+                if (!File.Exists(keepOriginal) || new FileInfo(keepOriginal).Length == 0)
+                    throw new InvalidOperationException("The audio source could not be downloaded.");
+                verifiedPath = keepOriginal;
+                download.OutputFile = Path.ChangeExtension(download.OutputFile, sourceExt);
+                download.Note = "Saved as " + sourceExt.TrimStart('.') + "; MP3 conversion failed.";
+            }
+            else
+            {
+                if (!File.Exists(stagingMp3) || new FileInfo(stagingMp3).Length == 0)
+                    throw new InvalidOperationException("ffmpeg did not produce an MP3");
+                verifiedPath = stagingMp3;
+            }
+            VerifyAudio(verifiedPath, download.ExpectedDurationSeconds);
+            ThrowIfCancelled(download);
+            if (File.Exists(download.OutputFile)) throw new IOException("A finished audio file already exists at " + download.OutputFile);
+            if (string.Equals(verifiedPath, stagingMp3, StringComparison.OrdinalIgnoreCase))
+                File.Move(stagingMp3, download.OutputFile);
+            else
+                File.Move(verifiedPath, download.OutputFile);
+            download.Phase = "complete";
+            download.Status = "complete";
+            if (download.SegmentsTotal > 0) download.SegmentsDone = download.SegmentsTotal;
+        }
+        catch (OperationCanceledException)
+        {
+            download.Status = "cancelled";
+            download.Phase = "cancelled";
+            download.Error = "Stopped by user.";
+        }
+        catch (Exception error)
+        {
+            if (IsCancelled(download))
+            {
+                download.Status = "cancelled";
+                download.Phase = "cancelled";
+                download.Error = "Stopped by user.";
+            }
+            else
+            {
+                download.Status = "failed";
+                download.Phase = "failed";
+                download.Error = SafeAudioDownloadError(error.Message);
+            }
+        }
+        finally
+        {
+            DeleteIfExists(stagingMp3);
+            DeleteIfExists(stagingSource);
+            try { if (Directory.Exists(workDir)) Directory.Delete(workDir, true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
     private static void SaveSegment(HttpListenerContext context)
     {
         var id = context.Request.Headers["X-Capture-Session"] ?? "";
@@ -556,6 +690,34 @@ public static class LessonCaptureCollector
             path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsPublicHttpsUrl(string value, out Uri media)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out media) || media.Scheme != "https" ||
+            !string.IsNullOrEmpty(media.UserInfo) || media.Port != 443 || value.Length > 16384 ||
+            !IsPublicHost(media.Host)) return false;
+        return true;
+    }
+
+    private static string GuessAudioExtension(string mediaUrl)
+    {
+        try
+        {
+            var path = new Uri(mediaUrl).AbsolutePath.ToLowerInvariant();
+            if (path.EndsWith(".mp3")) return ".mp3";
+            if (path.EndsWith(".m4a")) return ".m4a";
+            if (path.EndsWith(".aac")) return ".aac";
+            if (path.EndsWith(".ogg")) return ".ogg";
+            if (path.EndsWith(".opus")) return ".opus";
+            if (path.EndsWith(".wav")) return ".wav";
+            if (path.EndsWith(".webm")) return ".webm";
+            if (path.EndsWith(".m3u8")) return ".m3u8";
+            if (path.EndsWith(".mpd")) return ".mpd";
+        }
+        catch { /* fall through */ }
+        // Extensionless CDN URLs are usually MP3; default so remux/copy path works.
+        return ".mp3";
+    }
+
     private static bool IsPublicHost(string host)
     {
         if (string.IsNullOrWhiteSpace(host) || host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
@@ -591,6 +753,22 @@ public static class LessonCaptureCollector
         return "The stream could not be converted to a playable MP4. It may be unavailable, protected, or unsupported.";
     }
 
+    private static string SafeAudioDownloadError(string error)
+    {
+        if (error.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            error.IndexOf("403", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "The media URL was denied or expired (HTTP 401/403). Retry from the open audio page.";
+        if (error.IndexOf("404", StringComparison.OrdinalIgnoreCase) >= 0)
+            return "The media URL was not found (HTTP 404).";
+        if (error.IndexOf("no playable audio stream", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            error.IndexOf("duration", StringComparison.OrdinalIgnoreCase) >= 0)
+            return error;
+        if (error == "ffprobe was not found" || error == "ffmpeg was not found") return error;
+        if (!string.IsNullOrWhiteSpace(error))
+            return "The stream could not be saved as playable audio: " + error.Trim();
+        return "The stream could not be saved as playable audio. It may be unavailable, protected, or unsupported.";
+    }
+
     private static void VerifyMp4(string output)
     {
         if (!File.Exists(FfprobePath)) throw new InvalidOperationException("ffprobe was not found");
@@ -607,6 +785,42 @@ public static class LessonCaptureCollector
             process.WaitForExit();
             if (process.ExitCode != 0 || !streams.Contains("video"))
                 throw new InvalidOperationException("The output has no playable video stream");
+        }
+    }
+
+    private static void VerifyAudio(string output, double? expectedDurationSeconds)
+    {
+        if (!File.Exists(FfprobePath)) throw new InvalidOperationException("ffprobe was not found");
+        var start = new ProcessStartInfo {
+            FileName = FfprobePath,
+            Arguments = "-v error -show_entries stream=codec_type:format=duration -of default=noprint_wrappers=1:nokey=0 " + Quote(output),
+            UseShellExecute = false, RedirectStandardOutput = true,
+            RedirectStandardError = true, CreateNoWindow = true
+        };
+        using (var process = Process.Start(start))
+        {
+            var probe = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0 || probe.IndexOf("codec_type=audio", StringComparison.OrdinalIgnoreCase) < 0)
+                throw new InvalidOperationException("The output has no playable audio stream");
+            var durationMatch = Regex.Match(probe, @"duration=([0-9.]+)", RegexOptions.IgnoreCase);
+            double actual = 0;
+            var hasDuration = durationMatch.Success && double.TryParse(durationMatch.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out actual);
+            if (!hasDuration || actual <= 0)
+                throw new InvalidOperationException("The output has no playable audio stream");
+            if (expectedDurationSeconds.HasValue && expectedDurationSeconds.Value > 0)
+            {
+                var expected = expectedDurationSeconds.Value;
+                var tolerance = Math.Max(15.0, expected * 0.08);
+                if (Math.Abs(actual - expected) > tolerance)
+                    throw new InvalidOperationException(
+                        "Saved audio duration (" + actual.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) +
+                        "s) does not match the player (" +
+                        expected.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "s).");
+            }
         }
     }
 
@@ -965,14 +1179,79 @@ public static class LessonCaptureCollector
         }
     }
 
+    private static void RunFfmpegAudio(string mediaUrl, string referer, string output)
+    {
+        if (!File.Exists(FfmpegPath)) throw new FileNotFoundException("ffmpeg was not found", FfmpegPath);
+        var start = new ProcessStartInfo {
+            FileName = FfmpegPath,
+            Arguments = "-nostdin -y -v error -referer " + Quote(referer) +
+                " -user_agent " + Quote("Mozilla/5.0") + " -i " + Quote(mediaUrl) +
+                " -vn -c:a libmp3lame -q:a 2 " + Quote(output),
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        using (var process = Process.Start(start))
+        {
+            var errors = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new InvalidOperationException(errors.Trim());
+        }
+    }
+
     private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
     private static void DeleteIfExists(string path) { if (File.Exists(path)) File.Delete(path); }
 
     private static string OutputName(CaptureSession session)
     {
-        var id = SafeName(session.Id);
-        if (id.Length > 8) id = id.Substring(0, 8);
-        return SafeName(session.Title) + " - " + session.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HH-mm-ss") + " - " + id + ".mp4";
+        return OutputName(session, ".mp4");
+    }
+
+    private static string OutputName(CaptureSession session, string extension)
+    {
+        var ext = string.IsNullOrWhiteSpace(extension) ? ".mp4" : extension;
+        if (!ext.StartsWith(".")) ext = "." + ext;
+        // Keep the on-screen lesson title only. Strip leftover date/id suffixes from
+        // older extension builds so recaptures do not keep stacking jargon.
+        var stem = CleanTitleStem(SafeName(session.Title));
+        if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
+        if (stem.Length > 90) stem = stem.Substring(0, 90).Trim(' ', '.');
+        if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
+        return UniqueOutputFile(stem, ext);
+    }
+
+    private static string CleanTitleStem(string value)
+    {
+        var stem = (value ?? "").Trim();
+        // "Lesson - 2026-10-17 1137" or "Lesson - 2026-10-17 11-37-45 - abcdef12"
+        stem = Regex.Replace(stem,
+            @"\s+-\s+\d{4}-\d{2}-\d{2}(?:[_\s]\d{2}[-:]?\d{2}(?:[-:]?\d{2})?)?(?:\s+-\s+[0-9a-f]{6,})?\s*$",
+            "", RegexOptions.IgnoreCase).Trim(' ', '.', '-');
+        if (string.IsNullOrWhiteSpace(stem)) return "lesson";
+        return stem;
+    }
+
+    private static string UniqueOutputFile(string stem, string extension)
+    {
+        var plain = stem + extension;
+        if (!OutputNameTaken(plain)) return plain;
+        for (var n = 2; n < 1000; n++)
+        {
+            var name = stem + " (" + n + ")" + extension;
+            if (!OutputNameTaken(name)) return name;
+        }
+        return stem + " (" + DateTime.Now.ToString("HHmmss") + ")" + extension;
+    }
+
+    private static bool OutputNameTaken(string name)
+    {
+        var full = Path.Combine(FinishedVideoRoot, name);
+        if (File.Exists(full) || File.Exists(full + ".partial.mp4") || File.Exists(full + ".partial.mp3")) return true;
+        foreach (var download in Downloads.Values)
+        {
+            if (string.Equals(download.OutputFile, full, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     private static void WriteMetadata(CaptureSession session, DateTime? completedAt, string packagingStatus = null, string outputFile = null, string packagingError = null)
@@ -993,6 +1272,23 @@ public static class LessonCaptureCollector
     {
         object value;
         return data.TryGetValue(key, out value) && value != null ? value.ToString() : fallback;
+    }
+
+    private static double? Number(Dictionary<string, object> data, string key)
+    {
+        object value;
+        if (!data.TryGetValue(key, out value) || value == null || value is DBNull) return null;
+        if (value is double) return (double)value;
+        if (value is float) return (float)value;
+        if (value is decimal) return (double)(decimal)value;
+        if (value is int) return (int)value;
+        if (value is long) return (long)value;
+        double parsed;
+        if (double.TryParse(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture),
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out parsed))
+            return parsed;
+        return null;
     }
 
     private static int ResolvePort()
