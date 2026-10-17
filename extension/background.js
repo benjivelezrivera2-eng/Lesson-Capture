@@ -680,40 +680,57 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
         target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
         return true;
       };
+      const elementDuration = (node) => (
+        node && Number.isFinite(node.duration) && node.duration > 0 ? node.duration : null
+      );
+      const sharedDecision = (node, src, post) => {
+        if (!globalThis.LessonTitle?.chooseSharedAudioUrl) return { use: false, url: "" };
+        return globalThis.LessonTitle.chooseSharedAudioUrl({
+          currentSrc: src,
+          postTitle: post?.title,
+          postDuration: post?.duration,
+          barText: nowPlayingText(),
+          audioDuration: elementDuration(node),
+        });
+      };
       // Click this post's play control and read the shared body audio. The src
       // is extensionless https on files.therealworld.ag. Never a page-level guess.
+      // A src change by itself is not the selected lesson. If this post is already
+      // the now-playing item, keep the current src and do not click play.
       const resolvePostUrl = async (post) => {
         const beforeNode = bodyAudio();
         const previousSrc = readSrc(beforeNode);
         const wasPlaying = Boolean(beforeNode && beforeNode.paused === false);
-        if (!clickPlay(post)) return "";
+        const already = sharedDecision(beforeNode, previousSrc, post);
+        if (already.use) return { url: already.url, duration: elementDuration(beforeNode) };
+        if (!clickPlay(post)) return { url: "", duration: null };
         const deadline = Date.now() + 4000;
         let captured = "";
+        let capturedDuration = null;
         while (Date.now() < deadline) {
           const node = bodyAudio();
           const src = readSrc(node);
-          if (src && src !== previousSrc) {
-            captured = src;
-            break;
-          }
-          const bar = nowPlayingText();
-          if (src && src === previousSrc && post.title && roughly(post.title, bar)) {
-            captured = src;
+          const decision = sharedDecision(node, src, post);
+          if (decision.use) {
+            captured = decision.url;
+            capturedDuration = elementDuration(node);
             break;
           }
           await delay(100);
         }
         const node = bodyAudio();
-        if (node && node.paused === false) {
-          try { node.pause(); } catch { /* already paused */ }
+        if (captured && captured !== previousSrc) {
+          if (node && node.paused === false) {
+            try { node.pause(); } catch { /* already paused */ }
+          }
+          if (wasPlaying && previousSrc && node) {
+            try {
+              if ((node.currentSrc || node.src) !== previousSrc) node.src = previousSrc;
+              await node.play();
+            } catch { /* restoring the previous item was not possible */ }
+          }
         }
-        if (wasPlaying && previousSrc && node) {
-          try {
-            if ((node.currentSrc || node.src) !== previousSrc) node.src = previousSrc;
-            await node.play();
-          } catch { /* restoring the previous item was not possible */ }
-        }
-        return captured;
+        return { url: captured, duration: capturedDuration };
       };
 
       if (!globalThis.LessonTitle) {
@@ -794,7 +811,8 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
         }
       }
       if (options.resolveUrl && preferred && !error) {
-        const captured = await resolvePostUrl(preferred);
+        const resolved = await resolvePostUrl(preferred);
+        const captured = resolved?.url || "";
         const bar = nowPlayingText();
         const barStem = bar.replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, "").trim();
         if (!preferred.title && barStem && globalThis.LessonTitle) {
@@ -812,12 +830,15 @@ async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = 
           });
         }
         const node = bodyAudio();
+        const savedDuration = Number.isFinite(resolved?.duration) && resolved.duration > 0
+          ? resolved.duration
+          : (Number.isFinite(preferred.duration) ? preferred.duration : null);
         preferred = {
           ...preferred,
           url: captured || null,
           blob: /^blob:/i.test(node?.currentSrc || node?.src || ""),
           protected: Boolean(node?.mediaKeys),
-          duration: Number.isFinite(node?.duration) && node.duration > 0 ? node.duration : null,
+          duration: savedDuration,
         };
         candidates = candidates.map((item) => item.id === preferred.id ? { ...item, ...preferred } : item);
         if (!preferred.url) error = "Audio not loaded yet, press play on this post first";

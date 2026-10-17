@@ -90,6 +90,34 @@
     return left === right || left.indexOf(right) !== -1 || right.indexOf(left) !== -1;
   }
 
+  // True, false, or null when either side has no duration yet.
+  // Two seconds covers 1:59 on the card versus 119.1 from the element.
+  function durationsAgree(postSeconds, audioSeconds) {
+    var post = Number(postSeconds);
+    var audio = Number(audioSeconds);
+    var postKnown = Number.isFinite(post) && post > 0;
+    var audioKnown = Number.isFinite(audio) && audio > 0;
+    if (!postKnown || !audioKnown) return null;
+    return Math.abs(post - audio) <= 2;
+  }
+
+  // The shared body audio is the selected post when the now-playing title
+  // matches exactly, or the durations match. A title match whose duration
+  // belongs to a different file is rejected. "Certainty" does not match
+  // "Stop Looking for Certainty".
+  function chooseSharedAudioUrl(input) {
+    var source = input || {};
+    var current = String(source.currentSrc || "");
+    if (!current || /^blob:|^data:/i.test(current)) return { use: false, url: "" };
+    var left = roughKey(source.postTitle);
+    var right = roughKey(source.barText);
+    var titleOk = Boolean(left && right && left === right);
+    var duration = durationsAgree(source.postDuration, source.audioDuration);
+    if (titleOk && duration === false) return { use: false, url: "" };
+    if (titleOk || duration === true) return { use: true, url: current };
+    return { use: false, url: "" };
+  }
+
   function splitLines(value) {
     return String(value || "").split(/\n+/).map(collapse).filter(Boolean);
   }
@@ -1131,6 +1159,7 @@
     describeAudioPosts: describeAudioPosts,
     findAudioPlayers: findAudioPlayers,
     roughlySame: roughlySame,
+    chooseSharedAudioUrl: chooseSharedAudioUrl,
     windowsFileStem: windowsFileStem,
     spokenFileTitle: spokenFileTitle,
     duplicateFileName: duplicateFileName,

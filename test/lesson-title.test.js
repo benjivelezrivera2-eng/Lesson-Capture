@@ -617,6 +617,59 @@ test("the teacher, not the poster, prefixes the file and the dropdown label", ()
   assert.match(longStem, /^Seth H - /);
 });
 
+test("shared audio url is the selected post, not the previous attachment", () => {
+  const certainty = "https://files.therealworld.ag/certainty-119";
+  const older = "https://files.therealworld.ag/older-205";
+  const already = LessonTitle.chooseSharedAudioUrl({
+    currentSrc: certainty,
+    postTitle: "Certainty",
+    postDuration: 119,
+    barText: "Certainty.mp3",
+    audioDuration: 119.1,
+  });
+  assert.equal(already.use, true);
+  assert.equal(already.url, certainty);
+
+  const staleSwap = LessonTitle.chooseSharedAudioUrl({
+    currentSrc: older,
+    postTitle: "Certainty",
+    postDuration: 119,
+    barText: "Certainty.mp3",
+    audioDuration: 205.6,
+  });
+  assert.equal(staleSwap.use, false);
+  assert.equal(staleSwap.url, "");
+
+  const otherLesson = LessonTitle.chooseSharedAudioUrl({
+    currentSrc: older,
+    postTitle: "Certainty",
+    postDuration: 119,
+    barText: "Stop Looking for Certainty.mp3",
+    audioDuration: 205.6,
+  });
+  assert.equal(otherLesson.use, false);
+
+  const durationOnly = LessonTitle.chooseSharedAudioUrl({
+    currentSrc: certainty,
+    postTitle: "Certainty",
+    postDuration: 119,
+    barText: "",
+    audioDuration: 119.4,
+  });
+  assert.equal(durationOnly.use, true);
+  assert.equal(durationOnly.url, certainty);
+
+  const afterClick = LessonTitle.chooseSharedAudioUrl({
+    currentSrc: "https://files.therealworld.ag/master-key",
+    postTitle: "Never Give the Agent the Master Key",
+    postDuration: 156,
+    barText: "Never Give the Agent the Master Key.mp3",
+    audioDuration: 156.2,
+  });
+  assert.equal(afterClick.use, true);
+  assert.equal(afterClick.url, "https://files.therealworld.ag/master-key");
+});
+
 function argsHead(logged) {
   assert.ok(logged, "missing debug log");
   return logged[0];
