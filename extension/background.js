@@ -462,25 +462,115 @@ function looksLikeHost(value, site) {
   return text === host || text === host.split(".")[0];
 }
 
-function captureStamp(when) {
-  const date = when instanceof Date ? when : new Date();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day} ${hours}${minutes}`;
-}
-
 function clipName(value, max) {
   const text = windowsSafe(value);
   if (text.length <= max) return text;
   return text.slice(0, max).replace(/[. ]+$/g, "").trim() || "lesson";
 }
 
-function captureNames(meta, when = new Date()) {
+// Runs inside the page via executeScript. Prefer the selected course-sidebar
+// lesson (and breadcrumb) over tab/host titles so Lesson Captures files match
+// the on-screen name instead of app.jointherealworld.com.
+function scrapePageNamingFields() {
+  const text = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const attrLabel = (el) => {
+    if (!el) return "";
+    return text(el.getAttribute("title") || el.getAttribute("aria-label") || "");
+  };
+  const cleanLessonLabel = (raw) => text(String(raw || "")
+    .replace(/\b\d+\s+videos?\b/gi, " ")
+    .replace(/\b\d+\s+lessons?\b/gi, " ")
+    .replace(/\b\d+\s+modules?\b/gi, " ")
+    .replace(/\block(?:ed)?\b/gi, " "));
+  const pickLabel = (node) => {
+    if (!node) return "";
+    const fromAttr = attrLabel(node) ||
+      [...node.querySelectorAll("[title], [aria-label]")]
+        .map(attrLabel)
+        .find((value) => value.length >= 2 && value.length <= 140) || "";
+    const heading = [...node.querySelectorAll("a, p, span, h2, h3, h4, [data-testid*='title' i]")]
+      .map((el) => attrLabel(el) || cleanLessonLabel(el.textContent))
+      .filter((value) => value.length >= 3 && value.length <= 120)
+      .sort((a, b) => b.length - a.length);
+    // Longest compact label wins; short badge text like "1" must not beat the lesson name.
+    const fromText = heading.find((value) => value.length <= 90) || heading[0] || "";
+    const own = cleanLessonLabel(node.textContent);
+    if (fromAttr && (!fromText || fromAttr.length >= fromText.length)) return fromAttr.slice(0, 140);
+    if (fromText) return fromText.slice(0, 140);
+    if (own && own.length <= 100) return own.slice(0, 140);
+    return "";
+  };
+
+  let sidebarTitle = "";
+  try {
+    const lessonId = new URL(location.href).searchParams.get("lesson");
+    if (lessonId) {
+      sidebarTitle = pickLabel(document.getElementById(lessonId));
+      if (!sidebarTitle) {
+        const link = [...document.querySelectorAll("a[href*='lesson=']")]
+          .find((candidate) => {
+            try {
+              return new URL(candidate.href, location.href).searchParams.get("lesson") === lessonId;
+            } catch {
+              return false;
+            }
+          });
+        sidebarTitle = pickLabel(link) || pickLabel(link?.closest("li, article, section, div"));
+      }
+    }
+  } catch {
+    /* ignore malformed URLs */
+  }
+
+  if (!sidebarTitle) {
+    const crumbs = [...document.querySelectorAll(
+      "nav[aria-label*='breadcrumb' i] li, nav[aria-label*='breadcrumb' i] a, nav[aria-label*='breadcrumb' i] span, [class*='breadcrumb' i] li, [class*='breadcrumb' i] a"
+    )]
+      .map((el) => cleanLessonLabel(el.textContent))
+      .filter((value) => value.length >= 2 && value.length <= 120 &&
+        !/^(home|learning|courses?)$/i.test(value));
+    if (crumbs.length) sidebarTitle = crumbs[crumbs.length - 1].slice(0, 140);
+  }
+
+  const player = [...document.querySelectorAll("video")].reverse()
+    .find((node) => /^[a-f0-9]{32}$/i.test(node.id));
+  const near = player?.closest("article, section, main, div")
+    ?.querySelector("h1, h2, [data-testid*='title' i]")?.textContent;
+
+  return {
+    tabTitle: text(document.title),
+    ogTitle: text(document.querySelector('meta[property="og:title"]')?.getAttribute("content")),
+    h1: text(document.querySelector("h1")?.textContent),
+    siteName: text(document.querySelector('meta[property="og:site_name"]')?.getAttribute("content")),
+    channel: text(
+      document.querySelector('[data-testid*="channel" i]')?.textContent ||
+      document.querySelector("nav [aria-current='page']")?.textContent ||
+      ""
+    ).replace(/^#/, ""),
+    lessonTitle: text(
+      sidebarTitle ||
+      document.querySelector("mux-player[title]")?.getAttribute("title") ||
+      document.querySelector("[data-testid*='lesson-title']")?.textContent ||
+      near ||
+      document.querySelector("h1")?.textContent
+    ),
+    sidebarTitle: text(sidebarTitle),
+    site: location.hostname.replace(/^www\./, ""),
+    duration: player && Number.isFinite(player.duration) && player.duration > 0 ? player.duration : null,
+  };
+}
+
+function captureNames(meta) {
   const source = meta || {};
   const site = hostFromUrl(`https://${source.site || "page"}`);
-  const stamp = captureStamp(when);
+  const sidebar = stripDecor(source.sidebarTitle);
+  // Learning pages: the selected sidebar lesson is the authoritative on-screen name.
+  // Finished files use that title only — no date/id jargon. The collector adds (2)
+  // if the same name already exists.
+  if (sidebar && !genericSite(sidebar) && !looksLikeHost(sidebar, site)) {
+    const stem = clipName(sidebar, 90);
+    return { display: stem, fileStem: stem };
+  }
   const channel = stripDecor(source.channel);
   const pageName = channel && !genericSite(channel) && !looksLikeHost(channel, site) ? channel : "";
   const candidates = [source.lessonTitle, source.h1, source.ogTitle, source.tabTitle]
@@ -491,22 +581,22 @@ function captureNames(meta, when = new Date()) {
     : candidates[0]) || "";
   const display = pageName && title ? `${pageName} - ${title}` : (title || pageName);
   const fallback = windowsSafe(source.siteName) || site || "page";
-  const stem = display || fallback;
-  const stampPart = ` - ${stamp}`;
-  const fileStem = `${clipName(stem, 90 - stampPart.length)} - ${stamp}`;
-  return { display: display || fallback, fileStem };
+  const stem = clipName(display || fallback, 90);
+  return { display: stem || fallback, fileStem: stem || fallback };
 }
 
-function namesForMedia(tab, media) {
+async function namesForMedia(tab, media) {
+  const page = tab?.id ? await readPageNaming(tab.id) : {};
   const naming = media?.naming || {};
   return captureNames({
-    tabTitle: naming.tabTitle || tab?.title || "",
-    ogTitle: naming.ogTitle || "",
-    h1: naming.h1 || "",
-    siteName: naming.siteName || "",
-    channel: naming.channel || media?.channel || "",
-    lessonTitle: naming.lessonTitle || media?.title || "",
-    site: naming.site || media?.site || hostFromUrl(tab?.url),
+    tabTitle: page.tabTitle || naming.tabTitle || tab?.title || "",
+    ogTitle: page.ogTitle || naming.ogTitle || "",
+    h1: page.h1 || naming.h1 || "",
+    siteName: page.siteName || naming.siteName || "",
+    channel: naming.channel || page.channel || media?.channel || "",
+    lessonTitle: page.sidebarTitle || naming.lessonTitle || page.lessonTitle || media?.title || "",
+    sidebarTitle: page.sidebarTitle || naming.sidebarTitle || "",
+    site: page.site || naming.site || media?.site || hostFromUrl(tab?.url),
   });
 }
 
@@ -861,7 +951,7 @@ async function audioCaptureKey(tab, audio) {
 
 async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
   const page = new URL(tab.url);
-  const names = namesForMedia(tab, audio);
+  const names = await namesForMedia(tab, audio);
   const title = names.fileStem;
   const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -975,7 +1065,7 @@ async function startOtherSiteDownload(tab) {
     if (directDownloadStates().length >= MAX_CONCURRENT_DOWNLOADS)
       throw new Error(`All ${MAX_CONCURRENT_DOWNLOADS} download slots are busy. Try again when one finishes.`);
     await requireCollector();
-    const names = namesForMedia(tab, video);
+    const names = await namesForMedia(tab, video);
     const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: names.fileStem, lessonUrl: `${page.origin}${page.pathname}`,
@@ -997,7 +1087,7 @@ async function startOtherSiteDownload(tab) {
       try {
         await delay(800);
         const again = await currentOtherSiteVideo(tab.id, true);
-        const retryNames = namesForMedia(tab, again);
+        const retryNames = await namesForMedia(tab, again);
         const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title: retryNames.fileStem, lessonUrl: `${page.origin}${page.pathname}`,
@@ -1130,32 +1220,7 @@ async function readPageNaming(tabId) {
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => {
-        const text = (value) => String(value || "").replace(/\s+/g, " ").trim();
-        const player = [...document.querySelectorAll("video")].reverse()
-          .find((node) => /^[a-f0-9]{32}$/i.test(node.id));
-        const near = player?.closest("article, section, main, div")
-          ?.querySelector("h1, h2, [data-testid*='title' i]")?.textContent;
-        return {
-          tabTitle: text(document.title),
-          ogTitle: text(document.querySelector('meta[property="og:title"]')?.getAttribute("content")),
-          h1: text(document.querySelector("h1")?.textContent),
-          siteName: text(document.querySelector('meta[property="og:site_name"]')?.getAttribute("content")),
-          channel: text(
-            document.querySelector('[data-testid*="channel" i]')?.textContent ||
-            document.querySelector("nav [aria-current='page']")?.textContent ||
-            ""
-          ).replace(/^#/, ""),
-          lessonTitle: text(
-            document.querySelector("mux-player[title]")?.getAttribute("title") ||
-            document.querySelector("[data-testid*='lesson-title']")?.textContent ||
-            near ||
-            document.querySelector("h1")?.textContent
-          ),
-          site: location.hostname.replace(/^www\./, ""),
-          duration: player && Number.isFinite(player.duration) && player.duration > 0 ? player.duration : null,
-        };
-      },
+      func: scrapePageNamingFields,
     });
     return result || {};
   } catch {
@@ -1183,7 +1248,8 @@ async function startDirectDownload(tabId) {
       h1: naming.h1 || "",
       siteName: naming.siteName || "",
       channel: naming.channel || "",
-      lessonTitle: naming.lessonTitle || "",
+      lessonTitle: naming.sidebarTitle || naming.lessonTitle || "",
+      sidebarTitle: naming.sidebarTitle || "",
       site: naming.site || hostFromUrl(source.url),
     });
     directDownloadQueue.push({

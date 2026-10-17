@@ -1211,16 +1211,24 @@ public static class LessonCaptureCollector
     {
         var ext = string.IsNullOrWhiteSpace(extension) ? ".mp4" : extension;
         if (!ext.StartsWith(".")) ext = "." + ext;
-        var stem = SafeName(session.Title);
-        if (!Regex.IsMatch(stem, @"\d{4}-\d{2}-\d{2} \d{4}$"))
-        {
-            var stamp = session.StartedAt.ToLocalTime().ToString("yyyy-MM-dd HHmm");
-            var room = Math.Max(1, 90 - (stamp.Length + 3));
-            if (stem.Length > room) stem = stem.Substring(0, room).Trim(' ', '.');
-            if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
-            stem = stem + " - " + stamp;
-        }
+        // Keep the on-screen lesson title only. Strip leftover date/id suffixes from
+        // older extension builds so recaptures do not keep stacking jargon.
+        var stem = CleanTitleStem(SafeName(session.Title));
+        if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
+        if (stem.Length > 90) stem = stem.Substring(0, 90).Trim(' ', '.');
+        if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
         return UniqueOutputFile(stem, ext);
+    }
+
+    private static string CleanTitleStem(string value)
+    {
+        var stem = (value ?? "").Trim();
+        // "Lesson - 2026-10-17 1137" or "Lesson - 2026-10-17 11-37-45 - abcdef12"
+        stem = Regex.Replace(stem,
+            @"\s+-\s+\d{4}-\d{2}-\d{2}(?:[_\s]\d{2}[-:]?\d{2}(?:[-:]?\d{2})?)?(?:\s+-\s+[0-9a-f]{6,})?\s*$",
+            "", RegexOptions.IgnoreCase).Trim(' ', '.', '-');
+        if (string.IsNullOrWhiteSpace(stem)) return "lesson";
+        return stem;
     }
 
     private static string UniqueOutputFile(string stem, string extension)
