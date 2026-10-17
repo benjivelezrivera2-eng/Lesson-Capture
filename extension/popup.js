@@ -139,10 +139,23 @@ function setBar(percent, waiting) {
   fill.style.opacity = "1";
 }
 
+function formatPanelError(error) {
+  const text = String(error || "");
+  if (text.startsWith("Audio not loaded yet")) return text;
+  if (text.startsWith("That post isn't loaded anymore")) return text;
+  return `Download failed or unsupported: ${text}`;
+}
+
+function sameAudio(item, id) {
+  if (!item || !id) return false;
+  if (item.id === id) return true;
+  return Array.isArray(item.keys) && item.keys.includes(id);
+}
+
 function renderAudioPick(candidates, selectedId) {
   if (!audioPickWrap || !audioPick) return;
   audioCandidates = Array.isArray(candidates) ? candidates : [];
-  if (captureMode !== "audio" || audioCandidates.length < 2) {
+  if (captureMode !== "audio" || audioCandidates.length === 0) {
     audioPickWrap.hidden = true;
     return;
   }
@@ -152,11 +165,11 @@ function renderAudioPick(candidates, selectedId) {
     const option = document.createElement("option");
     option.value = item.id;
     const length = formatDuration(item.duration);
-    const playing = item.playing ? " · playing" : "";
-    option.textContent = `${item.label || "Audio"}${length ? ` (${length})` : ""}${playing}`;
+    const playing = item.playing ? " - playing" : "";
+    option.textContent = `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
     audioPick.append(option);
   }
-  const preferred = audioCandidates.find((item) => item.id === previous)
+  const preferred = audioCandidates.find((item) => sameAudio(item, previous))
     || audioCandidates.find((item) => item.playing)
     || audioCandidates.find((item) => item.preferred)
     || audioCandidates[0];
@@ -271,7 +284,7 @@ async function refresh() {
   start.textContent = startLabel(state);
   const title = readableTitle(state.displayTitle || state.title);
   if (state.error) {
-    status.textContent = `Download failed or unsupported: ${state.error}`;
+    status.textContent = formatPanelError(state.error);
   } else if (state.active) {
     status.textContent = captureMode === "audio"
       ? "Downloading this audio. You can keep using the tab while it finishes."
@@ -285,7 +298,7 @@ async function refresh() {
       : "Stopped. Capture again when you want this video.";
   } else {
     status.textContent = captureMode === "audio"
-      ? "Ready. This captures the audio on the page without playing it through."
+      ? "Ready. Capture plays the selected post, reads its file, then pauses."
       : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
   }
 
@@ -323,7 +336,7 @@ start.addEventListener("click", async () => {
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);
   if (result.error) {
-    status.textContent = `Download failed or unsupported: ${result.error}`;
+    status.textContent = formatPanelError(result.error);
     return;
   }
   status.textContent = captureMode === "audio"

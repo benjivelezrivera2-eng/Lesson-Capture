@@ -394,7 +394,6 @@ async function otherSiteCaptureKey(tab, video) {
 
 const AUDIO_PATH_RE = /\.(mp3|m4a|aac|ogg|opus|wav|webm|m3u8|mpd)(?:$|\?)/i;
 const AUDIO_MIME_RE = /^audio\//i;
-const audioNetworkProbes = new Map();
 
 function isAudioMediaUrl(value) {
   try {
@@ -406,11 +405,6 @@ function isAudioMediaUrl(value) {
   } catch {
     return false;
   }
-}
-
-function isLikelyAudioNetworkUrl(url, mimeType = "") {
-  if (AUDIO_MIME_RE.test(mimeType || "")) return true;
-  return isAudioMediaUrl(url);
 }
 
 // Extensionless CDN URLs need an audio MIME so older collectors accept them;
@@ -604,10 +598,18 @@ async function namesForMedia(tab, media) {
 // the download request body and never written to persisted extension state.
 // warm=true may briefly play a paused player once on Capture only — never from
 // status/list polls (those stuttered the call every ~1s).
-async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
+async function inspectPageAudio(tabId, { audioId = null, resolveUrl = false } = {}) {
+  // Isolated world. Content scripts do not reinject until the tab reloads,
+  // so load the parser on each inspect. A miss is logged; the page title is not used.
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["lesson-title.js"],
+  }).catch((error) => {
+    console.warn("[Lesson Capture] Selector failed: lesson-title.js", error?.message || error);
+  });
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    args: [{ warm: Boolean(warm), audioId }],
+    args: [{ audioId: audioId || null, resolveUrl: Boolean(resolveUrl) }],
     func: async (options) => {
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const strictAudioUrl = (value) => {
@@ -631,46 +633,6 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
           return null;
         } catch { return null; }
       };
-      const collectMedia = () => {
-        const found = [];
-        const visit = (root) => {
-          for (const element of root.querySelectorAll("*")) {
-            if (element instanceof HTMLAudioElement) found.push(element);
-            else if (element instanceof HTMLVideoElement) {
-              // Audio posts sometimes render in a video element with no picture.
-              const audioLike = !element.videoWidth || element.videoWidth < 16 ||
-                element.getAttribute("audio") != null ||
-                /audio/i.test(element.getAttribute("aria-label") || "") ||
-                /\.mp3|\.m4a|audio/i.test(element.currentSrc || element.src || "");
-              if (audioLike) found.push(element);
-            } else if (element.shadowRoot) visit(element.shadowRoot);
-          }
-        };
-        visit(document);
-        return found;
-      };
-      const resourceUrls = () => {
-        try {
-          return performance.getEntriesByType("resource")
-            .map((entry) => {
-              const strict = strictAudioUrl(entry.name);
-              if (strict) return strict;
-              // Blob players still fetch an HTTPS file first; keep that request.
-              if (/mp3|m4a|mpeg|audio\/|\/audio\b/i.test(entry.name)) {
-                return looseMediaUrl(entry.name, true);
-              }
-              if ((entry.initiatorType === "audio" || entry.initiatorType === "video") &&
-                String(entry.name).startsWith("https://")) {
-                return entry.name;
-              }
-              return null;
-            })
-            .filter(Boolean);
-        } catch { return []; }
-      };
-      const anchorUrls = () => [...document.querySelectorAll("a[href]")]
-        .map((anchor) => strictAudioUrl(anchor.href))
-        .filter(Boolean);
       const channel = (
         document.querySelector('[data-testid*="channel" i]')?.textContent ||
         document.querySelector('nav [aria-current="page"]')?.textContent ||
@@ -679,129 +641,206 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
           .find((text) => /^#[\w-]+$/.test(text)) ||
         ""
       ).trim().replace(/^#/, "").slice(0, 80);
-      const pageTitle = (
-        document.querySelector('[class*="player" i] [class*="title" i]')?.textContent ||
-        document.querySelector("h1")?.textContent ||
-        document.querySelector("[data-testid*='title' i]")?.textContent ||
-        document.title ||
-        "audio"
-      ).trim().slice(0, 140);
       const ogTitle = (document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "").trim();
       const siteName = (document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "").trim();
       const h1 = (document.querySelector("h1")?.textContent || "").trim();
 
-      let elements = collectMedia();
-      // warm runs at most once per Capture when no HTTPS URL was found yet.
-      // If the user already pressed play, only read currentSrc — never pause.
-      if (options.warm && elements.length) {
-        const target = options.audioId
-          ? elements.find((el, index) => `audio-${index}` === options.audioId) || elements[0]
-          : (elements.find((el) => !el.paused)
-            || (window.__lessonCaptureLastAudio instanceof HTMLMediaElement
-              ? window.__lessonCaptureLastAudio
-              : null)
-            || elements[0]);
-        if (target) {
-          if (target.paused) {
-            const wasMuted = target.muted;
-            target.muted = true;
-            try {
-              if (target.readyState < HTMLMediaElement.HAVE_METADATA) {
-                await Promise.race([
-                  new Promise((resolve) => target.addEventListener("loadedmetadata", resolve, { once: true })),
-                  delay(1500),
-                ]);
-              }
-              await target.play();
-              await delay(900);
-              target.pause();
-            } catch { /* URL may already be present without play */ }
-            target.muted = wasMuted;
+      // Posts have no <audio> until play. The player is the custom control.
+      let elements = globalThis.LessonTitle ? globalThis.LessonTitle.findAudioPlayers(document) : [];
+      const describePosts = (log) => (globalThis.LessonTitle
+        ? globalThis.LessonTitle.describeAudioPosts(elements, document, { log })
+        : []);
+      const bodyAudio = () => document.querySelector("body > audio");
+      const readSrc = (node) => {
+        if (!node) return "";
+        const value = node.currentSrc || node.src || "";
+        if (!value || /^blob:|^data:/i.test(value)) return "";
+        return looseMediaUrl(value, true) || "";
+      };
+      const rough = (value) => String(value || "")
+        .replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+      const roughly = (a, b) => {
+        if (globalThis.LessonTitle?.roughlySame) return globalThis.LessonTitle.roughlySame(a, b);
+        const left = rough(a);
+        const right = rough(b);
+        if (!left || !right) return false;
+        return left === right || left.includes(right) || right.includes(left);
+      };
+      const nowPlayingText = () => (
+        document.querySelector("div.relative.flex.border-b.bg-base-300 p.truncate")?.textContent || ""
+      ).trim();
+      const clickPlay = (post) => {
+        const root = post?.element;
+        const svg = root?.querySelector?.("svg.cursor-pointer");
+        const target = svg || root;
+        if (!target?.dispatchEvent) return false;
+        target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        return true;
+      };
+      // Click this post's play control and read the shared body audio. The src
+      // is extensionless https on files.therealworld.ag. Never a page-level guess.
+      const resolvePostUrl = async (post) => {
+        const beforeNode = bodyAudio();
+        const previousSrc = readSrc(beforeNode);
+        const wasPlaying = Boolean(beforeNode && beforeNode.paused === false);
+        if (!clickPlay(post)) return "";
+        const deadline = Date.now() + 4000;
+        let captured = "";
+        while (Date.now() < deadline) {
+          const node = bodyAudio();
+          const src = readSrc(node);
+          if (src && src !== previousSrc) {
+            captured = src;
+            break;
           }
-          elements = collectMedia();
+          const bar = nowPlayingText();
+          if (src && src === previousSrc && post.title && roughly(post.title, bar)) {
+            captured = src;
+            break;
+          }
+          await delay(100);
         }
-      }
+        const node = bodyAudio();
+        if (node && node.paused === false) {
+          try { node.pause(); } catch { /* already paused */ }
+        }
+        if (wasPlaying && previousSrc && node) {
+          try {
+            if ((node.currentSrc || node.src) !== previousSrc) node.src = previousSrc;
+            await node.play();
+          } catch { /* restoring the previous item was not possible */ }
+        }
+        return captured;
+      };
 
-      const fromElements = elements.map((element, index) => {
-        const preferAudio = element instanceof HTMLAudioElement ||
-          !element.videoWidth || element.videoWidth < 16;
-        const values = [
-          element.currentSrc,
-          element.getAttribute("src"),
-          ...[...element.querySelectorAll("source")].map((source) => source.src || source.getAttribute("src")),
-        ];
-        const url = values.map((value) => looseMediaUrl(value, preferAudio)).find(Boolean) || null;
-        const blob = values.some((value) => String(value || "").startsWith("blob:"));
-        const playedAt = Number(element.dataset.lessonCapturePlayedAt || 0);
-        const last = window.__lessonCaptureLastAudio === element;
-        const duration = Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null;
-        const label = (
-          element.getAttribute("title") ||
-          element.getAttribute("aria-label") ||
-          element.closest("article, li, [role='listitem'], [data-testid]")?.querySelector("h2, h3, time, [data-testid*='title' i]")?.textContent ||
-          pageTitle
-        ).trim().slice(0, 120) || `Audio ${index + 1}`;
+      if (!globalThis.LessonTitle) {
+        console.warn("[Lesson Capture] Selector failed: lesson-title.js");
+      }
+      // One row per message. The shared body <audio> is not its own row, and
+      // its src is not attached until this post's play control changes it.
+      const described = describePosts(true);
+      const posts = globalThis.LessonTitle ? described : [...document.querySelectorAll("div.chat-message[data-message-id]")]
+        .filter((card) => card.getAttribute("data-embed-message") !== "true")
+        .map((card) => {
+          const messageId = card.getAttribute("data-message-id");
+          return {
+            id: `post-${messageId}`,
+            keys: [`post-${messageId}`],
+            element: card,
+            elements: [card],
+            title: "",
+            fileStem: null,
+            playing: false,
+            cardSelector: "lesson-title.js",
+          };
+        });
+      const matchesId = (item) => item.id === options.audioId ||
+        (Array.isArray(item.keys) && item.keys.includes(options.audioId));
+      let candidates = posts.map((post) => {
+        const nodes = post.elements?.length ? post.elements : [post.element];
+        const playedAt = nodes.reduce((max, node) => {
+          const value = Number(node.dataset?.lessonCapturePlayedAt || 0);
+          return value > max ? value : max;
+        }, 0);
+        const last = nodes.some((node) => window.__lessonCaptureLastAudio === node);
+        const title = String(post.title || "").trim();
         return {
-          id: `audio-${index}`,
-          url,
-          blob,
-          duration,
-          label,
-          playing: !element.paused,
+          id: post.id,
+          keys: post.keys || [post.id],
+          element: post.element,
+          url: null,
+          blob: false,
+          label: title || "Untitled audio",
+          title,
+          fileStem: post.fileStem || null,
+          duration: Number.isFinite(post.duration) ? post.duration : null,
+          playing: Boolean(post.playing),
           playedAt,
           preferred: last || playedAt > 0,
-          protected: Boolean(element.mediaKeys),
+          protected: false,
+          cardSelector: post.cardSelector || "",
         };
       });
-
-      const elementUrls = new Set(fromElements.map((item) => item.url).filter(Boolean));
-      const fromNetwork = [...new Set([...resourceUrls(), ...anchorUrls()])]
-        .filter((url) => !elementUrls.has(url))
-        .map((url, index) => ({
-          id: `network-${index}`,
-          url,
-          blob: false,
-          duration: null,
-          label: pageTitle,
-          playing: false,
-          playedAt: 0,
-          preferred: false,
-          protected: false,
-        }));
-
-      const candidates = [...fromElements, ...fromNetwork]
-        .filter((item) => item.url || item.protected || item.blob)
-        .sort((a, b) => Number(b.playing) - Number(a.playing) ||
-          Number(b.preferred) - Number(a.preferred) ||
-          (b.playedAt || 0) - (a.playedAt || 0));
-
-      // Explicit picker id wins; otherwise whatever is currently playing.
       let preferred = null;
+      let error = null;
       if (options.audioId) {
-        preferred = candidates.find((item) => item.id === options.audioId && item.url) || null;
-      }
-      if (!preferred) {
-        preferred = candidates.find((item) => item.playing && item.url)
-          || candidates.find((item) => item.preferred && item.url)
-          || candidates.find((item) => item.url)
+        preferred = candidates.find(matchesId) || null;
+        if (!preferred) error = "That post isn't loaded anymore, scroll to it and pick again";
+      } else {
+        preferred = candidates.find((item) => item.playing)
+          || candidates.find((item) => item.preferred)
+          || candidates[0]
           || null;
+      }
+      if (options.resolveUrl && preferred && !preferred.title) {
+        await delay(500);
+        elements = globalThis.LessonTitle ? globalThis.LessonTitle.findAudioPlayers(document) : elements;
+        const retried = describePosts(false).find((post) => post.id === preferred.id ||
+          (Array.isArray(post.keys) && post.keys.includes(preferred.id)));
+        if (retried?.title) {
+          preferred = {
+            ...preferred,
+            element: retried.element || preferred.element,
+            title: String(retried.title).trim(),
+            fileStem: retried.fileStem || preferred.fileStem,
+            label: String(retried.title).trim(),
+          };
+          candidates = candidates.map((item) => item.id === preferred.id ? { ...item, ...preferred } : item);
+        }
+      }
+      if (options.resolveUrl && preferred && !error) {
+        const captured = await resolvePostUrl(preferred);
+        const bar = nowPlayingText();
+        const barStem = bar.replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, "").trim();
+        if (!preferred.title && barStem && globalThis.LessonTitle) {
+          const stem = globalThis.LessonTitle.windowsFileStem(barStem);
+          if (stem) {
+            preferred = { ...preferred, title: barStem, fileStem: stem, label: barStem };
+          }
+        } else if (preferred.title && barStem && !roughly(preferred.title, barStem)) {
+          console.warn("[Lesson Capture] Now-playing title does not match this post.", {
+            post: preferred.title,
+            nowPlaying: barStem,
+          });
+        }
+        const node = bodyAudio();
+        preferred = {
+          ...preferred,
+          url: captured || null,
+          blob: /^blob:/i.test(node?.currentSrc || node?.src || ""),
+          protected: Boolean(node?.mediaKeys),
+          duration: Number.isFinite(node?.duration) && node.duration > 0 ? node.duration : null,
+        };
+        candidates = candidates.map((item) => item.id === preferred.id ? { ...item, ...preferred } : item);
+        if (!preferred.url) error = "Audio not loaded yet, press play on this post first";
+      }
+      if (options.resolveUrl && preferred && !preferred.title) {
+        console.warn(`[Lesson Capture] Selector failed: ${preferred.cardSelector || "document.title"}. Refusing to name this audio "The Real World".`);
       }
 
       return {
         candidates: candidates.map((item) => ({
           id: item.id,
+          keys: item.keys,
           label: item.label,
+          title: item.title,
+          fileStem: item.fileStem,
           duration: item.duration,
           playing: Boolean(item.playing),
-          preferred: item.preferred || item === preferred,
+          preferred: Boolean(preferred && item.id === preferred.id),
           hasUrl: Boolean(item.url),
           protected: item.protected,
           blob: Boolean(item.blob),
         })),
+        error,
         preferredId: preferred?.id || null,
         mediaUrl: preferred?.url || null,
         duration: preferred?.duration ?? null,
-        title: preferred?.label || pageTitle,
+        title: preferred?.title || "",
+        fileStem: preferred?.fileStem || null,
         channel,
         site: location.hostname.replace(/^www\./, ""),
         naming: {
@@ -810,7 +849,7 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
           h1,
           siteName,
           channel,
-          lessonTitle: preferred?.label || pageTitle,
+          lessonTitle: preferred?.title || "",
           site: location.hostname.replace(/^www\./, ""),
         },
         protected: preferred?.protected || false,
@@ -824,7 +863,7 @@ async function inspectPageAudio(tabId, { warm = false, audioId = null } = {}) {
 
 async function listPageAudio(tabId) {
   try {
-    const inspection = await inspectPageAudio(tabId, { warm: false });
+    const inspection = await inspectPageAudio(tabId, { resolveUrl: false });
     return {
       candidates: inspection?.candidates || [],
       preferredId: inspection?.preferredId || null,
@@ -834,102 +873,22 @@ async function listPageAudio(tabId) {
   }
 }
 
-async function nudgePlayingMedia(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: async () => {
-      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const media = [];
-      const visit = (root) => {
-        for (const element of root.querySelectorAll("*")) {
-          if (element instanceof HTMLMediaElement) media.push(element);
-          else if (element.shadowRoot) visit(element.shadowRoot);
-        }
-      };
-      visit(document);
-      const target = media.find((el) => !el.paused) ||
-        (window.__lessonCaptureLastAudio instanceof HTMLMediaElement ? window.__lessonCaptureLastAudio : null) ||
-        media[0];
-      if (!target) return;
-      // Already playing: leave it alone so Capture does not stutter the call.
-      if (!target.paused) return;
-      const wasMuted = target.muted;
-      target.muted = true;
-      try {
-        await target.play();
-        await delay(1200);
-        target.pause();
-      } catch { /* network probe may still catch a prior request */ }
-      target.muted = wasMuted;
-    },
-  }).catch(() => {});
-}
-
-async function probeAudioFromNetwork(tabId, waitMs = 4500) {
-  const existing = audioNetworkProbes.get(tabId);
-  if (existing?.mediaUrl) return existing;
-  let attachedHere = false;
-  const probe = { mediaUrl: null, mimeType: null };
-  audioNetworkProbes.set(tabId, probe);
-  try {
-    try {
-      await chrome.debugger.attach({ tabId }, "1.3");
-      attachedHere = true;
-    } catch {
-      // Another debugger session may already be attached; still wait for events.
-    }
-    if (attachedHere) {
-      await chrome.debugger.sendCommand({ tabId }, "Network.enable");
-    }
-    await nudgePlayingMedia(tabId);
-    const deadline = Date.now() + waitMs;
-    while (Date.now() < deadline) {
-      if (probe.mediaUrl) break;
-      await delay(150);
-    }
-    return probe.mediaUrl ? { mediaUrl: probe.mediaUrl, mimeType: probe.mimeType } : null;
-  } finally {
-    audioNetworkProbes.delete(tabId);
-    if (attachedHere) chrome.debugger.detach({ tabId }).catch(() => {});
-  }
-}
-
 async function currentPageAudio(tabId, required = false, audioId = null) {
   let inspection;
   try {
-    // Always read-only first. Prefer the currently playing element.
-    // Warm only on Capture, once, and only if still no HTTPS URL.
-    inspection = await inspectPageAudio(tabId, { warm: false, audioId });
-    if (required && !inspection?.mediaUrl) {
-      const network = await probeAudioFromNetwork(tabId);
-      if (network?.mediaUrl) {
-        inspection = {
-          ...(inspection || {}),
-          mediaUrl: network.mediaUrl,
-          mimeType: network.mimeType || null,
-          title: inspection?.title,
-          channel: inspection?.channel,
-          site: inspection?.site,
-          duration: inspection?.duration ?? null,
-          protected: false,
-        };
-      }
-    }
-    if (required && !inspection?.mediaUrl) {
-      // Last resort: briefly play a paused player once (never loops; skips if already playing).
-      inspection = await inspectPageAudio(tabId, { warm: true, audioId });
-    }
+    // Capture clicks the picked post's play control and reads body > audio.src.
+    // Listing the dropdown does not. There is no network-log fallback.
+    inspection = await inspectPageAudio(tabId, { audioId, resolveUrl: required });
   } catch {
     if (required) throw new Error("This page's audio could not be inspected. Open the call and click the extension again.");
     return null;
   }
+  if (required && inspection?.error) throw new Error(inspection.error);
   if (inspection?.protected && required) {
     throw new Error("Unsupported protected player: direct audio download is unavailable.");
   }
   if (!inspection?.mediaUrl && required) {
-    throw new Error(inspection?.hasBlobPlayer
-      ? "This player uses a blob URL. Press play on the call, then Capture this audio so the real file request can be caught."
-      : "No accessible audio file is displayed. Press play briefly on the call, then try again.");
+    throw new Error(inspection?.error || "Audio not loaded yet, press play on this post first");
   }
   if (inspection?.mediaUrl && required) {
     const ok = isAudioMediaUrl(inspection.mediaUrl) ||
@@ -951,8 +910,14 @@ async function audioCaptureKey(tab, audio) {
 
 async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
   const page = new URL(tab.url);
-  const names = await namesForMedia(tab, audio);
-  const title = names.fileStem;
+  // The file is the lesson title only. The collector writes Title.mp3 and,
+  // when that name exists, Title (2).mp3. Never the tab title.
+  const title = audio?.fileStem || "";
+  if (!title || genericSite(title)) {
+    console.warn("[Lesson Capture] Selector failed: document.title. Refusing to save this audio as \"The Real World\".");
+    throw new Error("Could not read a lesson title from this post, so the file was not saved as The Real World.");
+  }
+  const displayTitle = audio.title || title;
   const response = await requireOk(await fetch(`${LOCAL_RECEIVER}/download`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -971,7 +936,7 @@ async function submitAudioJob(tab, audio, captureKey, authRetries = 0) {
     id: download.id,
     lessonUrl: captureKey,
     title,
-    displayTitle: names.display,
+    displayTitle,
     durationSeconds: Number.isFinite(audio.duration) ? audio.duration : null,
     kind: "audio",
     status: download.status,
@@ -1034,7 +999,7 @@ async function refreshAudioDownloadForTab(tabId) {
     return state;
   }
   const tab = await chrome.tabs.get(tabId);
-  const inspection = await inspectPageAudio(tabId, { warm: false });
+  const inspection = await inspectPageAudio(tabId, { resolveUrl: false });
   if (!inspection?.mediaUrl) return { active: false };
   const captureKey = await audioCaptureKey(tab, inspection);
   return refreshDirectDownloadForLesson(captureKey);
@@ -1628,15 +1593,6 @@ async function finalizeCapture(tabId) {
 }
 
 chrome.debugger.onEvent.addListener(async (source, method, params) => {
-  const audioProbe = audioNetworkProbes.get(source.tabId);
-  if (audioProbe && method === "Network.responseReceived" && !audioProbe.mediaUrl) {
-    const url = params.response?.url || "";
-    const mimeType = params.response?.mimeType || "";
-    if (url.startsWith("https://") && isLikelyAudioNetworkUrl(url, mimeType)) {
-      audioProbe.mediaUrl = url;
-      audioProbe.mimeType = mimeType || null;
-    }
-  }
   const probe = downloadProbes.get(source.tabId);
   if (probe) {
     if (method === "Network.responseReceived" && !probe.submitted) {

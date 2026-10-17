@@ -1217,6 +1217,8 @@ public static class LessonCaptureCollector
         if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
         if (stem.Length > 90) stem = stem.Substring(0, 90).Trim(' ', '.');
         if (string.IsNullOrWhiteSpace(stem)) stem = "lesson";
+        // Windows MAX_PATH is the whole path, not just the file name.
+        stem = FitStemToMaxPath(stem, ext);
         return UniqueOutputFile(stem, ext);
     }
 
@@ -1229,6 +1231,20 @@ public static class LessonCaptureCollector
             "", RegexOptions.IgnoreCase).Trim(' ', '.', '-');
         if (string.IsNullOrWhiteSpace(stem)) return "lesson";
         return stem;
+    }
+
+    private const int WindowsMaxPath = 260;
+
+    // Leave room for a duplicate suffix such as " (000000)" plus the extension.
+    private static string FitStemToMaxPath(string stem, string extension)
+    {
+        var root = Path.GetFullPath(FinishedVideoRoot).TrimEnd(Path.DirectorySeparatorChar);
+        var reserve = " (000000)".Length;
+        var budget = WindowsMaxPath - root.Length - 1 - reserve - (extension ?? "").Length;
+        if (budget < 1) budget = 1;
+        if (stem.Length <= budget) return stem;
+        var cut = stem.Substring(0, budget).Trim(' ', '.', '-', '_');
+        return string.IsNullOrWhiteSpace(cut) ? stem.Substring(0, budget) : cut;
     }
 
     private static string UniqueOutputFile(string stem, string extension)
