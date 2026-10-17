@@ -1,12 +1,17 @@
 /*
 !/.gitignore
 !/README.md
+!/package.json
+!/package-lock.json
 !/extension/
 !/local-collector/
+!/test/
+!/test/**
 
 /extension/*
 !/extension/background.js
 !/extension/content.js
+!/extension/lesson-title.js
 !/extension/manifest.json
 !/extension/popup.css
 !/extension/popup.html

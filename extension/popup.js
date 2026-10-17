@@ -142,7 +142,7 @@ function setBar(percent, waiting) {
 function renderAudioPick(candidates, selectedId) {
   if (!audioPickWrap || !audioPick) return;
   audioCandidates = Array.isArray(candidates) ? candidates : [];
-  if (captureMode !== "audio" || audioCandidates.length < 2) {
+  if (captureMode !== "audio" || audioCandidates.length === 0) {
     audioPickWrap.hidden = true;
     return;
   }
@@ -152,8 +152,8 @@ function renderAudioPick(candidates, selectedId) {
     const option = document.createElement("option");
     option.value = item.id;
     const length = formatDuration(item.duration);
-    const playing = item.playing ? " · playing" : "";
-    option.textContent = `${item.label || "Audio"}${length ? ` (${length})` : ""}${playing}`;
+    const playing = item.playing ? " - playing" : "";
+    option.textContent = `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
     audioPick.append(option);
   }
   const preferred = audioCandidates.find((item) => item.id === previous)
