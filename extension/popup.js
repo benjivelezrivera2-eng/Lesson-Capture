@@ -24,6 +24,7 @@ const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" width="16" heig
 
 let captureMode = "video";
 let audioCandidates = [];
+let selectedAudioId = "";
 let lastAudioListAt = 0;
 let shownJobId = null;
 let historyWrite = Promise.resolve();
@@ -152,28 +153,51 @@ function sameAudio(item, id) {
   return Array.isArray(item.keys) && item.keys.includes(id);
 }
 
+function audioOptionLabel(item) {
+  const length = formatDuration(item.duration);
+  const playing = item.playing ? " - playing" : "";
+  return `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
+}
+
 function renderAudioPick(candidates, selectedId) {
   if (!audioPickWrap || !audioPick) return;
+  const current = document.querySelector("#audio-pick-current");
+  const options = document.querySelector("#audio-pick-options");
   audioCandidates = Array.isArray(candidates) ? candidates : [];
   if (captureMode !== "audio" || audioCandidates.length === 0) {
     audioPickWrap.hidden = true;
     return;
   }
-  const previous = selectedId || audioPick.value;
-  audioPick.replaceChildren();
-  for (const item of audioCandidates) {
-    const option = document.createElement("option");
-    option.value = item.id;
-    const length = formatDuration(item.duration);
-    const playing = item.playing ? " - playing" : "";
-    option.textContent = `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
-    audioPick.append(option);
-  }
+  const wasOpen = Boolean(options && !options.hidden);
+  const previous = selectedId || selectedAudioId;
   const preferred = audioCandidates.find((item) => sameAudio(item, previous))
     || audioCandidates.find((item) => item.playing)
     || audioCandidates.find((item) => item.preferred)
     || audioCandidates[0];
-  if (preferred) audioPick.value = preferred.id;
+  selectedAudioId = preferred ? preferred.id : "";
+  if (current) {
+    const text = preferred ? audioOptionLabel(preferred) : "Which audio";
+    current.textContent = text;
+    current.title = text;
+    current.setAttribute("aria-expanded", wasOpen ? "true" : "false");
+  }
+  if (options) {
+    options.replaceChildren();
+    for (const item of audioCandidates) {
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.id = item.id;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", item.id === selectedAudioId ? "true" : "false");
+      const text = audioOptionLabel(item);
+      button.textContent = text;
+      button.title = text;
+      row.append(button);
+      options.append(row);
+    }
+    options.hidden = !wasOpen;
+  }
   audioPickWrap.hidden = false;
 }
 
@@ -331,7 +355,7 @@ start.addEventListener("click", async () => {
     ? {
       type: "LESSON_AUDIO_DOWNLOAD_START",
       tabId: tab.id,
-      audioId: audioPick && !audioPickWrap?.hidden ? audioPick.value : null,
+      audioId: !audioPickWrap?.hidden ? selectedAudioId : null,
     }
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);
@@ -376,6 +400,24 @@ clearHistory?.addEventListener("click", async () => {
   if (!ok) return;
   await chrome.storage.local.set({ [HISTORY_KEY[captureMode]]: [] });
   await refresh();
+});
+
+document.querySelector("#audio-pick-current")?.addEventListener("click", () => {
+  const options = document.querySelector("#audio-pick-options");
+  const current = document.querySelector("#audio-pick-current");
+  if (!options || !current) return;
+  options.hidden = !options.hidden;
+  current.setAttribute("aria-expanded", options.hidden ? "false" : "true");
+});
+
+document.querySelector("#audio-pick-options")?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-id]");
+  if (!button) return;
+  const options = document.querySelector("#audio-pick-options");
+  if (options) options.hidden = true;
+  const current = document.querySelector("#audio-pick-current");
+  if (current) current.setAttribute("aria-expanded", "false");
+  renderAudioPick(audioCandidates, button.dataset.id);
 });
 
 themeButton?.addEventListener("click", () => { toggleTheme().catch(() => {}); });

@@ -670,6 +670,22 @@ test("shared audio url is the selected post, not the previous attachment", () =>
   assert.equal(afterClick.url, "https://files.therealworld.ag/master-key");
 });
 
+test("the audio picker is an in-panel list with a vertical max height", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../extension/popup.css"), "utf8");
+  const panel = fs.readFileSync(path.join(__dirname, "../extension/sidepanel.html"), "utf8");
+  const popup = fs.readFileSync(path.join(__dirname, "../extension/popup.html"), "utf8");
+  assert.equal(panel.includes("<select"), false);
+  assert.equal(popup.includes("<select"), false);
+  assert.match(panel, /id="audio-pick-options"/);
+  assert.match(popup, /id="audio-pick-options"/);
+  const list = css.match(/\.audio-list ul \{[^}]+\}/);
+  assert.ok(list, "missing in-panel audio list rule");
+  assert.match(list[0], /max-height:\s*240px/);
+  assert.match(list[0], /overflow-x:\s*hidden/);
+  assert.match(list[0], /overflow-y:\s*auto/);
+  assert.match(list[0], /width:\s*100%/);
+});
+
 function argsHead(logged) {
   assert.ok(logged, "missing debug log");
   return logged[0];
