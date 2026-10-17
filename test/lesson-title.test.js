@@ -222,6 +222,8 @@ test("windows file stems are title-only and duplicates use (2)", () => {
   );
   assert.equal(LessonTitle.windowsFileStem('How to: Re-program? Your "Thoughts"'), "How to Re-program Your Thoughts");
   assert.equal(LessonTitle.windowsFileStem("The Real World"), null);
+  assert.equal(LessonTitle.windowsFileStem("audio"), null);
+  assert.equal(LessonTitle.windowsFileStem("pt-in | bootcamp-support EARTH EDITOR | earth"), null);
   assert.equal(LessonTitle.windowsFileStem("Notes."), "Notes");
   assert.equal(
     LessonTitle.duplicateFileName("How to Re-program Your Thoughts", []),
@@ -459,6 +461,61 @@ test("dropdown ids stay on the post when the list order changes", () => {
   assert.equal(idOf(forward, "Discipline"), idOf(backward, "Discipline"));
   assert.equal(idOf(forward, "Meta Is Consistently Inconsistent"), idOf(backward, "Meta Is Consistently Inconsistent"));
   assert.notEqual(idOf(forward, "Discipline"), idOf(forward, "Meta Is Consistently Inconsistent"));
+});
+
+test("daily-lessons colon titles: one dropdown row per mounted audio post", () => {
+  const { posts } = postsFrom(fixture("daily-lessons-colon.html"));
+  const expected = [
+    ["post-defensive", "Defensive Engineering (Prompt Injection Prevention)", 3 * 60 + 43, false],
+    ["post-good-pain", "There's Good Pain", 4 * 60 + 21, true],
+    ["post-thoughts", "Most of Your Thoughts Aren't Yours", 3 * 60 + 12, false],
+    ["post-rag", "Rag Is Not Just Vector Search (The Dumb Chunk Problem)", 4 * 60 + 57, false],
+    ["post-discipline", "Discipline Leads to Freedom", 3 * 60 + 6, false],
+    ["post-restart", "What Happens When You Restart", 3 * 60 + 50, false],
+    ["post-vendor", 'Vendor Lock-In And The "Assistants Api" Trap', 5 * 60 + 2, false],
+  ];
+  assert.equal(posts.length, 7);
+  for (const [id, title, duration, playing] of expected) {
+    const post = byId(posts, id);
+    assert.equal(post.title, title);
+    assert.equal(post.rule, "colon-line");
+    assert.equal(post.duration, duration);
+    assert.equal(post.playing, playing);
+    assert.equal(post.cardSelector, LessonTitle.SELECTORS.messageCard);
+    assert.doesNotMatch(post.title, /In this lesson|Technical Professor|@/);
+    assert.doesNotMatch(post.fileStem || "", /audio|bootcamp|leaderboard|earth editor|daily-lessons/i);
+    assert.doesNotMatch(post.cardText, /bootcamp|leaderboard|EARTH EDITOR/);
+  }
+  assert.equal(
+    byId(posts, "post-vendor").fileStem,
+    "Vendor Lock-In And The Assistants Api Trap",
+  );
+  assert.equal(posts.some((post) => post.title === "Fail more"), false);
+  assert.equal(posts.some((post) => (post.fileStem || "").toLowerCase() === "audio"), false);
+});
+
+test("a missing title uses the playing filename, otherwise speaker month year", () => {
+  const playing = LessonTitle.parseLessonTitle({
+    bodyText: "pt-in | bootcamp-support EARTH EDITOR | earth",
+    isPlaying: true,
+    nowPlayingTitle: "Stop Looking for Certainty.mp3",
+    author: "Chwuik",
+    timestampText: "04/16/2026",
+    pageTitle: "The Real World",
+  });
+  assert.equal(playing.title, "Stop Looking for Certainty");
+  assert.equal(playing.rule, "now-playing");
+  assert.equal(LessonTitle.windowsFileStem(playing.title), "Stop Looking for Certainty");
+
+  const silent = LessonTitle.parseLessonTitle({
+    bodyText: "pt-in | bootcamp-support EARTH EDITOR | earth",
+    author: "Chwuik",
+    timestampText: "04/16/2026",
+    pageTitle: "The Real World",
+  });
+  assert.equal(silent.title, "Chwuik April 2026");
+  assert.equal(silent.rule, "speaker-month-year");
+  assert.notEqual(silent.fileStem || silent.title, "audio");
 });
 
 function argsHead(logged) {

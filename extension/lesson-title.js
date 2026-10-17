@@ -56,11 +56,12 @@
     event: 2,
     "dated-lesson": 3,
     "labeled-mention": 4,
-    "single-line": 5,
-    "first-line": 6,
-    "now-playing": 7,
-    "speaker-month-year": 8,
-    none: 9,
+    "colon-line": 5,
+    "single-line": 6,
+    "first-line": 7,
+    "now-playing": 8,
+    "speaker-month-year": 9,
+    none: 10,
   };
 
   function collapse(value) {
@@ -109,9 +110,10 @@
   }
 
   function windowsFileStem(title) {
+    if (looksLikeSidebarTitle(title)) return null;
     var stripped = String(title || "").replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, "");
     var safe = windowsSafe(stripped);
-    if (!safe || isGenericTitle(safe)) return null;
+    if (!safe || isGenericTitle(safe) || looksLikeSidebarTitle(safe)) return null;
     if (safe.length > 180) safe = safe.slice(0, 180).replace(/[. ]+$/g, "").trim();
     if (!safe || isGenericTitle(safe)) return null;
     if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(safe)) return safe + "_";
@@ -560,8 +562,17 @@
     if (/arno-about lesson\s*:?$/i.test(text)) return true;
     if (/^brand new\b/i.test(text) && /lesson\s*:?$/i.test(text)) return true;
     if (/^includes roles?$/i.test(text)) return true;
+    if (/^in this lesson\b/i.test(text)) return true;
     if (isChannelToken(text)) return true;
     return false;
+  }
+
+  function looksLikeSidebarTitle(value) {
+    var text = collapse(value);
+    if (!text) return false;
+    var pipes = text.match(/\|/g);
+    if (pipes && pipes.length >= 2) return true;
+    return /bootcamp-support|earth editor|leaderboard|\bsidebar\b|call archive/i.test(text);
   }
 
   function stripMentions(value) {
@@ -577,6 +588,7 @@
 
   function acceptable(title, pageTitle) {
     if (!title || isGenericTitle(title)) return false;
+    if (looksLikeSidebarTitle(title)) return false;
     if (pageTitle && same(title, pageTitle)) return false;
     return true;
   }
@@ -634,6 +646,19 @@
       var labeled = cleanTitle(labeledTitle);
       if (acceptable(labeled, pageTitle)) return finish(labeled, "labeled-mention", source, bar);
     }
+
+    // "Discipline Leads to Freedom:" is the title. The next line is the blurb.
+    var colonTitle = "";
+    splitLines(raw).some(function (line) {
+      if (isNoiseLine(line, author)) return false;
+      var match = line.match(/^(.+):\s*$/);
+      if (!match) return false;
+      var candidate = cleanTitle(match[1]);
+      if (!acceptable(candidate, pageTitle)) return false;
+      colonTitle = candidate;
+      return true;
+    });
+    if (colonTitle) return finish(colonTitle, "colon-line", source, bar);
 
     var content = splitLines(raw).filter(function (line) { return !isNoiseLine(line, author); });
     if (content.length === 1) {
@@ -812,6 +837,24 @@
     return hash.toString(16);
   }
 
+  function clockSeconds(clock) {
+    var parts = String(clock || "").split(":").map(function (part) { return Number(part); });
+    if (!parts.length || parts.some(function (part) { return !Number.isFinite(part); })) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return null;
+  }
+
+  function playerDuration(elements) {
+    for (var i = 0; i < elements.length; i += 1) {
+      var match = String(elements[i].textContent || "").match(/(\d{1,2}:\d{2}(?::\d{2})?)\s*\/\s*(\d{1,2}:\d{2}(?::\d{2})?)/);
+      if (!match) continue;
+      var seconds = clockSeconds(match[2]);
+      if (seconds) return seconds;
+    }
+    return null;
+  }
+
   function pushKey(keys, value) {
     if (value && keys.indexOf(value) === -1) keys.push(value);
   }
@@ -931,6 +974,7 @@
         elements: entry.group.elements,
         title: chosen.parsed.title,
         fileStem: windowsFileStem(chosen.parsed.title),
+        duration: playerDuration(entry.group.elements),
         rule: chosen.parsed.rule,
         crossCheck: chosen.parsed.crossCheck,
         cardSelector: cardSelector,
