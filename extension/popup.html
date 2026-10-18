@@ -13,7 +13,7 @@
       <button type="button" id="mode-audio" class="mode-btn" data-mode="audio" aria-pressed="false">Audio</button>
       <button type="button" id="mode-video" class="mode-btn is-active" data-mode="video" aria-pressed="true">Video</button>
     </div>
-    <p id="status">Checking local processor…</p>
+    <p id="status" role="status" aria-live="polite" aria-atomic="true">Checking local processor…</p>
     <p id="now-playing" class="now-playing" hidden>Play a lesson to capture it</p>
     <div id="running" hidden>
       <div id="progress" class="progress-card">
@@ -24,14 +24,14 @@
       <div class="running-actions">
         <button type="button" id="stop">Stop this one</button>
         <button type="button" id="stop-all">Stop all</button>
-        <p id="summary" aria-live="polite"></p>
+        <p id="summary"></p>
       </div>
     </div>
     <button id="start">Capture this video</button>
-    <section class="history" aria-live="polite">
+    <section class="history">
       <div class="history-head">
         <h2 id="history-label">Video</h2>
-        <span id="history-count">0</span>
+        <span id="history-count">0 saved</span>
       </div>
       <p id="history-empty">No video captures yet.</p>
       <ul id="history" hidden></ul>
