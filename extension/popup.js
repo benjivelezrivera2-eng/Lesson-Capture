@@ -10,8 +10,7 @@ const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
 const modeAudio = document.querySelector("#mode-audio");
 const modeVideo = document.querySelector("#mode-video");
-const audioPickWrap = document.querySelector("#audio-pick-wrap");
-const audioPick = document.querySelector("#audio-pick");
+const nowPlayingLine = document.querySelector("#now-playing");
 const historyLabel = document.querySelector("#history-label");
 const historyCount = document.querySelector("#history-count");
 const historyEmpty = document.querySelector("#history-empty");
@@ -23,7 +22,6 @@ const HISTORY_KEY = { audio: "lessonCaptureHistoryAudio", video: "lessonCaptureH
 const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.4 1.75h8a1.75 1.75 0 0 1 1.75 1.75v8.75A1.75 1.75 0 0 1 18.75 19H5.25A1.75 1.75 0 0 1 3.5 17.25V6.75Z"/></svg>`;
 
 let captureMode = "video";
-let audioCandidates = [];
 let lastAudioListAt = 0;
 let shownJobId = null;
 let historyWrite = Promise.resolve();
@@ -56,10 +54,7 @@ function applyMode(mode) {
   modeVideo?.classList.toggle("is-active", captureMode === "video");
   modeAudio?.setAttribute("aria-pressed", captureMode === "audio" ? "true" : "false");
   modeVideo?.setAttribute("aria-pressed", captureMode === "video" ? "true" : "false");
-  if (captureMode === "video" && audioPickWrap) {
-    audioPickWrap.hidden = true;
-    audioCandidates = [];
-  }
+  if (captureMode === "video" && nowPlayingLine) nowPlayingLine.hidden = true;
 }
 
 async function loadMode() {
@@ -142,56 +137,44 @@ function setBar(percent, waiting) {
 function formatPanelError(error) {
   const text = String(error || "");
   if (text.startsWith("Audio not loaded yet")) return text;
+  if (text.startsWith("Play a lesson to capture it")) return text;
   if (text.startsWith("That post isn't loaded anymore")) return text;
   return `Download failed or unsupported: ${text}`;
 }
 
-function sameAudio(item, id) {
-  if (!item || !id) return false;
-  if (item.id === id) return true;
-  return Array.isArray(item.keys) && item.keys.includes(id);
-}
-
-function renderAudioPick(candidates, selectedId) {
-  if (!audioPickWrap || !audioPick) return;
-  audioCandidates = Array.isArray(candidates) ? candidates : [];
-  if (captureMode !== "audio" || audioCandidates.length === 0) {
-    audioPickWrap.hidden = true;
-    return;
-  }
-  const previous = selectedId || audioPick.value;
-  audioPick.replaceChildren();
-  for (const item of audioCandidates) {
-    const option = document.createElement("option");
-    option.value = item.id;
-    const length = formatDuration(item.duration);
-    const playing = item.playing ? " - playing" : "";
-    option.textContent = `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
-    audioPick.append(option);
-  }
-  const preferred = audioCandidates.find((item) => sameAudio(item, previous))
-    || audioCandidates.find((item) => item.playing)
-    || audioCandidates.find((item) => item.preferred)
-    || audioCandidates[0];
-  if (preferred) audioPick.value = preferred.id;
-  audioPickWrap.hidden = false;
-}
-
-async function refreshAudioCandidates(force = false) {
+function renderNowPlaying(nowPlaying) {
+  if (!nowPlayingLine) return;
   if (captureMode !== "audio") {
-    renderAudioPick([]);
+    nowPlayingLine.hidden = true;
     return;
   }
-  if (!force && Date.now() - lastAudioListAt < 5000) return;
+  nowPlayingLine.hidden = false;
+  if (!nowPlaying?.playing || !nowPlaying.label) {
+    nowPlayingLine.textContent = "Play a lesson to capture it";
+    nowPlayingLine.title = "";
+    return;
+  }
+  const length = formatDuration(nowPlaying.duration);
+  const text = `Now playing: ${nowPlaying.label}${length ? ` (${length})` : ""}`;
+  nowPlayingLine.textContent = text;
+  nowPlayingLine.title = text;
+}
+
+async function refreshNowPlaying(force = false) {
+  if (captureMode !== "audio") {
+    renderNowPlaying(null);
+    return;
+  }
+  if (!force && Date.now() - lastAudioListAt < 2000) return;
   try {
     const tab = await activeTab();
     const result = await chrome.runtime.sendMessage({
       type: "LESSON_AUDIO_LIST", tabId: tab.id,
     });
     lastAudioListAt = Date.now();
-    renderAudioPick(result?.candidates || [], result?.preferredId);
+    renderNowPlaying(result?.nowPlaying);
   } catch {
-    renderAudioPick([]);
+    renderNowPlaying(null);
   }
 }
 
@@ -298,7 +281,7 @@ async function refresh() {
       : "Stopped. Capture again when you want this video.";
   } else {
     status.textContent = captureMode === "audio"
-      ? "Ready. Capture plays the selected post, reads its file, then pauses."
+      ? "Ready. Capture saves the lesson that is playing."
       : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
   }
 
@@ -322,17 +305,13 @@ async function refresh() {
   }
 
   renderHistory(await loadHistory(captureMode));
-  await refreshAudioCandidates();
+  await refreshNowPlaying();
 }
 
 start.addEventListener("click", async () => {
   const tab = await activeTab();
   const payload = captureMode === "audio"
-    ? {
-      type: "LESSON_AUDIO_DOWNLOAD_START",
-      tabId: tab.id,
-      audioId: audioPick && !audioPickWrap?.hidden ? audioPick.value : null,
-    }
+    ? { type: "LESSON_AUDIO_DOWNLOAD_START", tabId: tab.id }
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);
   if (result.error) {

@@ -11,6 +11,10 @@
 //                    (posts have no <audio>; play appends one shared <audio> to <body>)
 //   now-playing bar  div.relative.flex.border-b.bg-base-300 p.truncate  (filename.mp3)
 //   list             div#chatchat-scroller-<channelId>, virtualized rows
+//   speaker          the teacher: "In this lesson <role> @Name" or "Daily @Name:",
+//                    from the mention span; otherwise the post author.
+//                    Files are "<Speaker> - <Title>.mp3". A dateless post stays
+//                    "<Speaker> <Month> <Year>" with no extra " - " prefix.
 //
 // The card is the nearest message wrapper around the player, and it must stay
 // inside the single-player ancestor (the virtual row, not the channel).
@@ -84,6 +88,103 @@
     var right = roughKey(b);
     if (!left || !right) return false;
     return left === right || left.indexOf(right) !== -1 || right.indexOf(left) !== -1;
+  }
+
+  // True, false, or null when either side has no duration yet.
+  // Two seconds covers 1:59 on the card versus 119.1 from the element.
+  function durationsAgree(postSeconds, audioSeconds) {
+    var post = Number(postSeconds);
+    var audio = Number(audioSeconds);
+    var postKnown = Number.isFinite(post) && post > 0;
+    var audioKnown = Number.isFinite(audio) && audio > 0;
+    if (!postKnown || !audioKnown) return null;
+    return Math.abs(post - audio) <= 2;
+  }
+
+  // The shared body audio is the selected post when the now-playing title
+  // matches exactly, or the durations match. A title match whose duration
+  // belongs to a different file is rejected. "Certainty" does not match
+  // "Stop Looking for Certainty".
+  function chooseSharedAudioUrl(input) {
+    var source = input || {};
+    var current = String(source.currentSrc || "");
+    if (!current || /^blob:|^data:/i.test(current)) return { use: false, url: "" };
+    var left = roughKey(source.postTitle);
+    var right = roughKey(source.barText);
+    var titleOk = Boolean(left && right && left === right);
+    var duration = durationsAgree(source.postDuration, source.audioDuration);
+    if (titleOk && duration === false) return { use: false, url: "" };
+    if (titleOk || duration === true) return { use: true, url: current };
+    return { use: false, url: "" };
+  }
+
+  // The playing lesson is the mounted post whose title matches the now-playing
+  // bar, or whose duration matches the shared player. No match uses the bar
+  // filename alone, with no speaker prefix.
+  function resolveNowPlaying(posts, input) {
+    var source = input || {};
+    var list = Array.isArray(posts) ? posts : [];
+    var barStem = nowPlayingStem(source.barText);
+    var barKey = roughKey(barStem);
+    var audioDuration = source.audioDuration;
+
+    function titleMatches(post) {
+      var key = roughKey(post && post.title);
+      return Boolean(barKey && key && key === barKey);
+    }
+    function durationState(post) {
+      return durationsAgree(post && post.duration, audioDuration);
+    }
+
+    var titleHits = list.filter(function (post) {
+      return post && post.title && titleMatches(post) && durationState(post) !== false;
+    });
+    var chosen = null;
+    if (titleHits.length === 1) chosen = titleHits[0];
+    else if (titleHits.length > 1) {
+      var both = titleHits.filter(function (post) { return durationState(post) === true; });
+      var playingTitle = titleHits.filter(function (post) { return post.playing; });
+      chosen = both[0] || (playingTitle.length === 1 ? playingTitle[0] : titleHits[0]);
+    }
+    if (!chosen) {
+      var durationHits = list.filter(function (post) {
+        return post && post.title && durationState(post) === true;
+      });
+      if (durationHits.length === 1) chosen = durationHits[0];
+      else if (durationHits.length > 1) {
+        var playingDuration = durationHits.filter(function (post) { return post.playing; });
+        if (playingDuration.length === 1) chosen = playingDuration[0];
+      }
+    }
+
+    if (chosen) {
+      var speaker = chosen.speaker || "";
+      var label = chosen.label || spokenFileTitle(chosen.title, chosen.rule, speaker);
+      var stem = chosen.fileStem || (label ? windowsFileStem(label) : null);
+      if (stem) {
+        return {
+          matched: true,
+          postId: chosen.id || null,
+          title: chosen.title,
+          speaker: speaker,
+          label: label,
+          fileStem: stem,
+          postDuration: Number(chosen.duration) > 0 ? Number(chosen.duration) : null,
+        };
+      }
+    }
+
+    var bare = barStem ? windowsFileStem(barStem) : null;
+    if (!bare) return null;
+    return {
+      matched: false,
+      postId: null,
+      title: bare,
+      speaker: "",
+      label: bare,
+      fileStem: bare,
+      postDuration: null,
+    };
   }
 
   function splitLines(value) {
@@ -456,6 +557,96 @@
     return name;
   }
 
+  // Badge emoji and pictographs are not part of a display name.
+  function cleanDisplayName(value) {
+    var text = String(value || "")
+      .replace(/\p{Extended_Pictographic}/gu, " ")
+      .replace(/[\u200d\ufe0e\ufe0f\u20e3]/g, "")
+      .replace(/[\u2600-\u27BF]/g, " ")
+      .replace(/…+/g, " ");
+    text = collapse(text).replace(/^@+\s*/, "");
+    return collapse(text);
+  }
+
+  // Poster names that are only bars or the letter I/l are unreadable badges.
+  function isJunkSpeaker(name) {
+    var compact = collapse(name).replace(/\s+/g, "");
+    if (!compact) return true;
+    return /^[Il|]+$/.test(compact);
+  }
+
+  function nameFromMentionCapture(raw) {
+    var text = String(raw || "");
+    var end = text.length;
+    var explainsAt = text.search(/\bexplains\b/i);
+    var dotsAt = text.search(/\.{2,}|…/);
+    if (explainsAt >= 0) end = Math.min(end, explainsAt);
+    if (dotsAt >= 0) end = Math.min(end, dotsAt);
+    text = cleanDisplayName(text.slice(0, end));
+    var words = text.split(" ").filter(Boolean);
+    var kept = [];
+    for (var i = 0; i < words.length && kept.length < 4; i += 1) {
+      var word = words[i].replace(/[,:;]+$/g, "");
+      if (!word) break;
+      if (kept.length && /^[a-z]/.test(word)) break;
+      if (!/^[\p{Lu}\p{Lt}]/u.test(word)) break;
+      kept.push(word);
+      if (/^\p{Lu}\.?$/u.test(word)) break;
+    }
+    return collapse(kept.join(" "));
+  }
+
+  // The teacher is the first "In this lesson <role> @Name" or "Daily @Name:".
+  function firstTeachingName(bodyText) {
+    var text = String(bodyText || "");
+    var found = [];
+    var lesson = /In this lesson\b(?:\s+(?!@)[^\s@]+){0,12}\s+@\s*([^\n@]+)/gi;
+    var match = lesson.exec(text);
+    if (match) {
+      var lessonName = nameFromMentionCapture(match[1]);
+      if (lessonName && !isJunkSpeaker(lessonName)) found.push({ index: match.index, name: lessonName });
+    }
+    var daily = /Daily\s+@\s*([^:\n]+)\s*:/gi;
+    match = daily.exec(text);
+    if (match) {
+      var dailyName = nameFromMentionCapture(match[1]);
+      if (dailyName && !isJunkSpeaker(dailyName)) found.push({ index: match.index, name: dailyName });
+    }
+    if (!found.length) return "";
+    found.sort(function (a, b) { return a.index - b.index; });
+    return found[0].name;
+  }
+
+  function resolveSpeaker(bodyText, author, mentionNames) {
+    var tagged = firstTeachingName(bodyText);
+    var names = mentionNames || [];
+    if (tagged) {
+      var taggedFirst = tagged.split(" ")[0].toLowerCase();
+      for (var i = 0; i < names.length; i += 1) {
+        var mention = cleanDisplayName(names[i]);
+        if (!mention || isJunkSpeaker(mention)) continue;
+        var mentionFirst = mention.split(" ")[0].toLowerCase();
+        if (same(mention, tagged) || mentionFirst === taggedFirst) return mention;
+      }
+      return tagged;
+    }
+    var person = cleanDisplayName(author);
+    if (isJunkSpeaker(person)) return "";
+    return person;
+  }
+
+  // "Pope - Free Email Aikido". Dateless names already start with the speaker.
+  function spokenFileTitle(title, rule, speaker) {
+    var name = collapse(title);
+    if (!name) return "";
+    if (rule === "speaker-month-year") return name;
+    var person = cleanDisplayName(speaker);
+    if (!person || isJunkSpeaker(person)) return name;
+    var prefix = person + " - ";
+    if (name.toLowerCase().indexOf(prefix.toLowerCase()) === 0) return name;
+    return prefix + name;
+  }
+
   function monthName(value) {
     var found = MONTHS.filter(function (month) {
       return month.toLowerCase() === String(value || "").toLowerCase();
@@ -597,29 +788,31 @@
     return cleanTitle(String(value || "").replace(/\.(mp3|m4a|aac|wav|ogg|opus|webm|mp4)$/i, ""));
   }
 
-  function finish(title, rule, input, bar) {
+  function finish(title, rule, input, bar, speaker) {
     var crossCheck = "unused";
     if (input.isPlaying && bar) crossCheck = roughlySame(bar, title) ? "match" : "differ";
-    return { title: title, rule: rule, crossCheck: crossCheck };
+    return { title: title, rule: rule, crossCheck: crossCheck, speaker: speaker || "" };
   }
 
   function parseLessonTitle(input) {
     var source = input || {};
     var raw = String(source.bodyText || "");
-    var author = speakerName(source.author);
+    var author = cleanDisplayName(speakerName(source.author));
+    if (isJunkSpeaker(author)) author = "";
+    var speaker = resolveSpeaker(raw, author, source.mentions);
     var pageTitle = collapse(source.pageTitle);
     var bar = nowPlayingStem(source.nowPlayingTitle);
 
     var quoted = raw.match(/TODAY'?S\s+LESSON\s*:\s*["“«]([^"”»]+)["”»]/i);
     if (quoted) {
       var quotedTitle = cleanTitle(quoted[1]);
-      if (acceptable(quotedTitle, pageTitle)) return finish(quotedTitle, "todays-lesson", source, bar);
+      if (acceptable(quotedTitle, pageTitle)) return finish(quotedTitle, "todays-lesson", source, bar, speaker);
     }
 
     var event = raw.match(/Event\s*:\s*(.+?)(?=\s+Date\s*:|\n|$)/i);
     if (event) {
       var eventTitle = cleanTitle(event[1]);
-      if (acceptable(eventTitle, pageTitle)) return finish(eventTitle, "event", source, bar);
+      if (acceptable(eventTitle, pageTitle)) return finish(eventTitle, "event", source, bar, speaker);
     }
 
     var datedTitle = "";
@@ -631,7 +824,7 @@
     });
     if (datedTitle) {
       var dated = cleanTitle(datedTitle);
-      if (acceptable(dated, pageTitle)) return finish(dated, "dated-lesson", source, bar);
+      if (acceptable(dated, pageTitle)) return finish(dated, "dated-lesson", source, bar, speaker);
     }
 
     // "Daily @Chwuik👽🎖️: Reduce the Noise" → "Reduce the Noise".
@@ -644,7 +837,7 @@
     });
     if (labeledTitle) {
       var labeled = cleanTitle(labeledTitle);
-      if (acceptable(labeled, pageTitle)) return finish(labeled, "labeled-mention", source, bar);
+      if (acceptable(labeled, pageTitle)) return finish(labeled, "labeled-mention", source, bar, speaker);
     }
 
     // "Discipline Leads to Freedom:" is the title. The next line is the blurb.
@@ -658,25 +851,25 @@
       colonTitle = candidate;
       return true;
     });
-    if (colonTitle) return finish(colonTitle, "colon-line", source, bar);
+    if (colonTitle) return finish(colonTitle, "colon-line", source, bar, speaker);
 
     var content = splitLines(raw).filter(function (line) { return !isNoiseLine(line, author); });
     if (content.length === 1) {
       var only = cleanTitle(content[0]);
-      if (acceptable(only, pageTitle)) return finish(only, "single-line", source, bar);
+      if (acceptable(only, pageTitle)) return finish(only, "single-line", source, bar, speaker);
     }
     for (var i = 0; i < content.length; i += 1) {
       var lineTitle = cleanTitle(content[i]);
-      if (acceptable(lineTitle, pageTitle)) return finish(lineTitle, "first-line", source, bar);
+      if (acceptable(lineTitle, pageTitle)) return finish(lineTitle, "first-line", source, bar, speaker);
     }
 
     if (source.isPlaying && bar && acceptable(bar, pageTitle)) {
-      return { title: bar, rule: "now-playing", crossCheck: "fallback" };
+      return { title: bar, rule: "now-playing", crossCheck: "fallback", speaker: speaker };
     }
 
     var when = monthYear(source.timestampISO, source.timestampText, source.now);
-    if (author && when) return finish(author + " " + when, "speaker-month-year", source, bar);
-    return { title: null, rule: "none", crossCheck: "unused" };
+    if (author && when) return finish(author + " " + when, "speaker-month-year", source, bar, speaker);
+    return { title: null, rule: "none", crossCheck: "unused", speaker: speaker };
   }
 
   function isPlayingMedia(element) {
@@ -715,6 +908,24 @@
     return null;
   }
 
+  // Mention spans inside the lesson text. The author header is outside it.
+  function mentionNamesIn(card) {
+    var names = [];
+    if (!card || !card.querySelectorAll) return names;
+    var nodes = card.querySelectorAll("[data-user-id]");
+    Array.prototype.forEach.call(nodes, function (node) {
+      if (!node.closest || !node.closest("span.custom-break-words, .markdown")) return;
+      var parentMention = node.parentElement && node.parentElement.closest
+        ? node.parentElement.closest("[data-user-id]")
+        : null;
+      if (parentMention && parentMention.closest("span.custom-break-words, .markdown")) return;
+      var name = cleanDisplayName(node.textContent);
+      if (!name || isJunkSpeaker(name)) return;
+      names.push(name);
+    });
+    return names;
+  }
+
   function readPieces(card) {
     var authorEl = authorElement(card);
     var authorFromSelector = speakerName(authorText(authorEl));
@@ -735,6 +946,7 @@
       bodyText: bodyText,
       bodyMatched: Boolean(bodyEl),
       cardText: cardText,
+      mentions: mentionNamesIn(card),
     };
   }
 
@@ -747,6 +959,7 @@
       isPlaying: context.isPlaying,
       pageTitle: context.pageTitle,
       now: context.now,
+      mentions: pieces.mentions || [],
     };
     var fromCard = parseLessonTitle(Object.assign({}, shared, { bodyText: pieces.cardText }));
     var fromBody = pieces.bodyMatched
@@ -940,6 +1153,7 @@
           bodyText: "",
           bodyMatched: false,
           cardText: "",
+          mentions: pieces.mentions || [],
         };
         chosen = chooseParse(fallbackPieces, {
           nowPlayingTitle: nowPlayingTitle,
@@ -955,10 +1169,13 @@
       if (log && !pieces.timestampMatched) warnOnce(documentRef, SELECTORS.timestamp);
       if (log && !chosen.parsed.title) warnOnce(documentRef, "document.title");
       var messageId = messageKey(entry.group.card);
+      var speaker = chosen.parsed.speaker || "";
+      var label = spokenFileTitle(chosen.parsed.title, chosen.parsed.rule, speaker);
       // Message id when the wrapper has one. Otherwise author + timestamp +
       // title. The audio URL is missing until play, and signed URLs rotate.
       var metaKey = "meta:" + djb2([
         pieces.author || "",
+        speaker,
         pieces.timestampISO || pieces.timestampText || "",
         chosen.parsed.title || "",
       ].join("\n"));
@@ -973,7 +1190,9 @@
         element: primaryElement(entry.group.elements),
         elements: entry.group.elements,
         title: chosen.parsed.title,
-        fileStem: windowsFileStem(chosen.parsed.title),
+        speaker: speaker,
+        label: label,
+        fileStem: label ? windowsFileStem(label) : null,
         duration: playerDuration(entry.group.elements),
         rule: chosen.parsed.rule,
         crossCheck: chosen.parsed.crossCheck,
@@ -1009,7 +1228,10 @@
     describeAudioPosts: describeAudioPosts,
     findAudioPlayers: findAudioPlayers,
     roughlySame: roughlySame,
+    chooseSharedAudioUrl: chooseSharedAudioUrl,
+    resolveNowPlaying: resolveNowPlaying,
     windowsFileStem: windowsFileStem,
+    spokenFileTitle: spokenFileTitle,
     duplicateFileName: duplicateFileName,
   };
 });
