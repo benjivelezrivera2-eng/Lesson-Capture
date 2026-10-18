@@ -9,7 +9,6 @@
 !/test/**
 
 /extension/*
-!/extension/audio-catalog.js
 !/extension/background.js
 !/extension/content.js
 !/extension/lesson-title.js

@@ -10,8 +10,7 @@ const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
 const modeAudio = document.querySelector("#mode-audio");
 const modeVideo = document.querySelector("#mode-video");
-const audioPickWrap = document.querySelector("#audio-pick-wrap");
-const audioPick = document.querySelector("#audio-pick");
+const nowPlayingLine = document.querySelector("#now-playing");
 const historyLabel = document.querySelector("#history-label");
 const historyCount = document.querySelector("#history-count");
 const historyEmpty = document.querySelector("#history-empty");
@@ -23,13 +22,7 @@ const HISTORY_KEY = { audio: "lessonCaptureHistoryAudio", video: "lessonCaptureH
 const FOLDER_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path fill="currentColor" d="M3.5 6.75A1.75 1.75 0 0 1 5.25 5h4.1l1.4 1.75h8a1.75 1.75 0 0 1 1.75 1.75v8.75A1.75 1.75 0 0 1 18.75 19H5.25A1.75 1.75 0 0 1 3.5 17.25V6.75Z"/></svg>`;
 
 let captureMode = "video";
-let audioCandidates = [];
-let selectedAudioId = "";
-let audioCatalog = { tabId: null, channel: "", items: [] };
 let lastAudioListAt = 0;
-const mergeAudioCatalog = globalThis.AudioCatalog
-  ? globalThis.AudioCatalog.mergeAudioCatalog
-  : (state, incoming) => ({ tabId: state?.tabId ?? null, channel: state?.channel || "", items: incoming || [] });
 let shownJobId = null;
 let historyWrite = Promise.resolve();
 
@@ -61,10 +54,7 @@ function applyMode(mode) {
   modeVideo?.classList.toggle("is-active", captureMode === "video");
   modeAudio?.setAttribute("aria-pressed", captureMode === "audio" ? "true" : "false");
   modeVideo?.setAttribute("aria-pressed", captureMode === "video" ? "true" : "false");
-  if (captureMode === "video" && audioPickWrap) {
-    audioPickWrap.hidden = true;
-    audioCandidates = [];
-  }
+  if (captureMode === "video" && nowPlayingLine) nowPlayingLine.hidden = true;
 }
 
 async function loadMode() {
@@ -147,85 +137,44 @@ function setBar(percent, waiting) {
 function formatPanelError(error) {
   const text = String(error || "");
   if (text.startsWith("Audio not loaded yet")) return text;
+  if (text.startsWith("Play a lesson to capture it")) return text;
   if (text.startsWith("That post isn't loaded anymore")) return text;
   return `Download failed or unsupported: ${text}`;
 }
 
-function sameAudio(item, id) {
-  if (!item || !id) return false;
-  if (item.id === id) return true;
-  return Array.isArray(item.keys) && item.keys.includes(id);
-}
-
-function audioOptionLabel(item) {
-  const length = formatDuration(item.duration);
-  const playing = item.playing ? " - playing" : "";
-  return `${item.label || "Untitled audio"}${length ? ` (${length})` : ""}${playing}`;
-}
-
-function renderAudioPick(candidates, selectedId) {
-  if (!audioPickWrap || !audioPick) return;
-  const current = document.querySelector("#audio-pick-current");
-  const options = document.querySelector("#audio-pick-options");
-  audioCandidates = Array.isArray(candidates) ? candidates : [];
-  if (captureMode !== "audio" || audioCandidates.length === 0) {
-    audioPickWrap.hidden = true;
-    return;
-  }
-  const caption = audioPickWrap.querySelector("span");
-  if (caption) caption.textContent = `Which audio (${audioCandidates.length})`;
-  const wasOpen = Boolean(options && !options.hidden);
-  const previous = selectedId || selectedAudioId;
-  const preferred = audioCandidates.find((item) => sameAudio(item, previous))
-    || audioCandidates.find((item) => item.playing)
-    || audioCandidates.find((item) => item.preferred)
-    || audioCandidates[0];
-  selectedAudioId = preferred ? preferred.id : "";
-  if (current) {
-    const text = preferred ? audioOptionLabel(preferred) : "Which audio";
-    current.textContent = text;
-    current.title = text;
-    current.setAttribute("aria-expanded", wasOpen ? "true" : "false");
-  }
-  if (options) {
-    options.replaceChildren();
-    for (const item of audioCandidates) {
-      const row = document.createElement("li");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.id = item.id;
-      button.setAttribute("role", "option");
-      button.setAttribute("aria-selected", item.id === selectedAudioId ? "true" : "false");
-      const text = audioOptionLabel(item);
-      button.textContent = text;
-      button.title = text;
-      row.append(button);
-      options.append(row);
-    }
-    options.hidden = !wasOpen;
-  }
-  audioPickWrap.hidden = false;
-}
-
-async function refreshAudioCandidates(force = false) {
+function renderNowPlaying(nowPlaying) {
+  if (!nowPlayingLine) return;
   if (captureMode !== "audio") {
-    renderAudioPick([]);
+    nowPlayingLine.hidden = true;
     return;
   }
-  if (!force && Date.now() - lastAudioListAt < 5000) return;
+  nowPlayingLine.hidden = false;
+  if (!nowPlaying?.playing || !nowPlaying.label) {
+    nowPlayingLine.textContent = "Play a lesson to capture it";
+    nowPlayingLine.title = "";
+    return;
+  }
+  const length = formatDuration(nowPlaying.duration);
+  const text = `Now playing: ${nowPlaying.label}${length ? ` (${length})` : ""}`;
+  nowPlayingLine.textContent = text;
+  nowPlayingLine.title = text;
+}
+
+async function refreshNowPlaying(force = false) {
+  if (captureMode !== "audio") {
+    renderNowPlaying(null);
+    return;
+  }
+  if (!force && Date.now() - lastAudioListAt < 2000) return;
   try {
     const tab = await activeTab();
     const result = await chrome.runtime.sendMessage({
       type: "LESSON_AUDIO_LIST", tabId: tab.id,
     });
     lastAudioListAt = Date.now();
-    audioCatalog = mergeAudioCatalog(audioCatalog, result?.candidates || [], {
-      tabId: tab?.id ?? null,
-      channel: result?.channel || "",
-    });
-    renderAudioPick(audioCatalog.items, selectedAudioId || result?.preferredId);
+    renderNowPlaying(result?.nowPlaying);
   } catch {
-    renderAudioPick([]);
+    renderNowPlaying(null);
   }
 }
 
@@ -332,7 +281,7 @@ async function refresh() {
       : "Stopped. Capture again when you want this video.";
   } else {
     status.textContent = captureMode === "audio"
-      ? "Ready. Capture plays the selected post, reads its file, then pauses."
+      ? "Ready. Capture saves the lesson that is playing."
       : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
   }
 
@@ -356,19 +305,13 @@ async function refresh() {
   }
 
   renderHistory(await loadHistory(captureMode));
-  await refreshAudioCandidates();
+  await refreshNowPlaying();
 }
 
 start.addEventListener("click", async () => {
   const tab = await activeTab();
-  const selectedAudio = audioCandidates.find((item) => item.id === selectedAudioId);
   const payload = captureMode === "audio"
-    ? {
-      type: "LESSON_AUDIO_DOWNLOAD_START",
-      tabId: tab.id,
-      audioId: !audioPickWrap?.hidden ? selectedAudioId : null,
-      scrollTop: Number.isFinite(Number(selectedAudio?.scrollTop)) ? Number(selectedAudio.scrollTop) : null,
-    }
+    ? { type: "LESSON_AUDIO_DOWNLOAD_START", tabId: tab.id }
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);
   if (result.error) {
@@ -412,24 +355,6 @@ clearHistory?.addEventListener("click", async () => {
   if (!ok) return;
   await chrome.storage.local.set({ [HISTORY_KEY[captureMode]]: [] });
   await refresh();
-});
-
-document.querySelector("#audio-pick-current")?.addEventListener("click", () => {
-  const options = document.querySelector("#audio-pick-options");
-  const current = document.querySelector("#audio-pick-current");
-  if (!options || !current) return;
-  options.hidden = !options.hidden;
-  current.setAttribute("aria-expanded", options.hidden ? "false" : "true");
-});
-
-document.querySelector("#audio-pick-options")?.addEventListener("click", (event) => {
-  const button = event.target.closest("button[data-id]");
-  if (!button) return;
-  const options = document.querySelector("#audio-pick-options");
-  if (options) options.hidden = true;
-  const current = document.querySelector("#audio-pick-current");
-  if (current) current.setAttribute("aria-expanded", "false");
-  renderAudioPick(audioCandidates, button.dataset.id);
 });
 
 themeButton?.addEventListener("click", () => { toggleTheme().catch(() => {}); });

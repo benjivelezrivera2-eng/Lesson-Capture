@@ -118,6 +118,75 @@
     return { use: false, url: "" };
   }
 
+  // The playing lesson is the mounted post whose title matches the now-playing
+  // bar, or whose duration matches the shared player. No match uses the bar
+  // filename alone, with no speaker prefix.
+  function resolveNowPlaying(posts, input) {
+    var source = input || {};
+    var list = Array.isArray(posts) ? posts : [];
+    var barStem = nowPlayingStem(source.barText);
+    var barKey = roughKey(barStem);
+    var audioDuration = source.audioDuration;
+
+    function titleMatches(post) {
+      var key = roughKey(post && post.title);
+      return Boolean(barKey && key && key === barKey);
+    }
+    function durationState(post) {
+      return durationsAgree(post && post.duration, audioDuration);
+    }
+
+    var titleHits = list.filter(function (post) {
+      return post && post.title && titleMatches(post) && durationState(post) !== false;
+    });
+    var chosen = null;
+    if (titleHits.length === 1) chosen = titleHits[0];
+    else if (titleHits.length > 1) {
+      var both = titleHits.filter(function (post) { return durationState(post) === true; });
+      var playingTitle = titleHits.filter(function (post) { return post.playing; });
+      chosen = both[0] || (playingTitle.length === 1 ? playingTitle[0] : titleHits[0]);
+    }
+    if (!chosen) {
+      var durationHits = list.filter(function (post) {
+        return post && post.title && durationState(post) === true;
+      });
+      if (durationHits.length === 1) chosen = durationHits[0];
+      else if (durationHits.length > 1) {
+        var playingDuration = durationHits.filter(function (post) { return post.playing; });
+        if (playingDuration.length === 1) chosen = playingDuration[0];
+      }
+    }
+
+    if (chosen) {
+      var speaker = chosen.speaker || "";
+      var label = chosen.label || spokenFileTitle(chosen.title, chosen.rule, speaker);
+      var stem = chosen.fileStem || (label ? windowsFileStem(label) : null);
+      if (stem) {
+        return {
+          matched: true,
+          postId: chosen.id || null,
+          title: chosen.title,
+          speaker: speaker,
+          label: label,
+          fileStem: stem,
+          postDuration: Number(chosen.duration) > 0 ? Number(chosen.duration) : null,
+        };
+      }
+    }
+
+    var bare = barStem ? windowsFileStem(barStem) : null;
+    if (!bare) return null;
+    return {
+      matched: false,
+      postId: null,
+      title: bare,
+      speaker: "",
+      label: bare,
+      fileStem: bare,
+      postDuration: null,
+    };
+  }
+
   function splitLines(value) {
     return String(value || "").split(/\n+/).map(collapse).filter(Boolean);
   }
@@ -907,17 +976,6 @@
     return card.getAttribute("data-message-id") || card.getAttribute("data-post-id") || "";
   }
 
-  function virtualRowTop(element) {
-    var node = element;
-    while (node && node.parentElement) {
-      var positioned = node.style && node.style.position === "absolute";
-      var top = positioned ? parseFloat(node.style.top) : NaN;
-      if (Number.isFinite(top)) return top;
-      node = node.parentElement;
-    }
-    return null;
-  }
-
   function primaryElement(elements) {
     for (var i = 0; i < elements.length; i += 1) {
       if (isPlayingMedia(elements[i])) return elements[i];
@@ -1141,7 +1199,6 @@
         cardSelector: cardSelector,
         cardText: String(chosen.text || "").slice(0, 500),
         playing: playing,
-        scrollTop: virtualRowTop(entry.group.card),
       };
     });
 
@@ -1172,6 +1229,7 @@
     findAudioPlayers: findAudioPlayers,
     roughlySame: roughlySame,
     chooseSharedAudioUrl: chooseSharedAudioUrl,
+    resolveNowPlaying: resolveNowPlaying,
     windowsFileStem: windowsFileStem,
     spokenFileTitle: spokenFileTitle,
     duplicateFileName: duplicateFileName,

@@ -670,58 +670,81 @@ test("shared audio url is the selected post, not the previous attachment", () =>
   assert.equal(afterClick.url, "https://files.therealworld.ag/master-key");
 });
 
-test("the audio picker is an in-panel list with a vertical max height", () => {
-  const css = fs.readFileSync(path.join(__dirname, "../extension/popup.css"), "utf8");
+test("now playing resolves to the mounted post, or the bar filename with no speaker", () => {
+  const posts = [
+    {
+      id: "post-long",
+      title: "Stop Looking for Certainty",
+      speaker: "Chwuik",
+      label: "Chwuik - Stop Looking for Certainty",
+      fileStem: "Chwuik - Stop Looking for Certainty",
+      duration: 300,
+      playing: false,
+    },
+    {
+      id: "post-certainty",
+      title: "Certainty",
+      speaker: "Seth H",
+      label: "Seth H - Certainty",
+      fileStem: "Seth H - Certainty",
+      duration: 119,
+      playing: true,
+    },
+  ];
+  const matched = LessonTitle.resolveNowPlaying(posts, {
+    barText: "Certainty.mp3",
+    audioDuration: 119.1,
+  });
+  assert.equal(matched.matched, true);
+  assert.equal(matched.postId, "post-certainty");
+  assert.equal(matched.label, "Seth H - Certainty");
+  assert.equal(matched.fileStem, "Seth H - Certainty");
+  assert.equal(matched.speaker, "Seth H");
+
+  const byDuration = LessonTitle.resolveNowPlaying(posts, {
+    barText: "",
+    audioDuration: 119.4,
+  });
+  assert.equal(byDuration.postId, "post-certainty");
+  assert.equal(byDuration.label, "Seth H - Certainty");
+
+  const otherDuration = LessonTitle.resolveNowPlaying(posts, {
+    barText: "Certainty.mp3",
+    audioDuration: 300.2,
+  });
+  assert.equal(otherDuration.matched, true);
+  assert.equal(otherDuration.postId, "post-long");
+  assert.equal(otherDuration.label, "Chwuik - Stop Looking for Certainty");
+
+  const contradicted = LessonTitle.resolveNowPlaying(posts, {
+    barText: "Certainty.mp3",
+    audioDuration: 205.6,
+  });
+  assert.equal(contradicted.matched, false);
+  assert.equal(contradicted.speaker, "");
+  assert.equal(contradicted.title, "Certainty");
+  assert.equal(contradicted.fileStem, "Certainty");
+  assert.equal(contradicted.label.includes(" - "), false);
+
+  const barOnly = LessonTitle.resolveNowPlaying([], {
+    barText: "Unlisted Lesson.mp3",
+    audioDuration: 90,
+  });
+  assert.equal(barOnly.matched, false);
+  assert.equal(barOnly.speaker, "");
+  assert.equal(barOnly.label, "Unlisted Lesson");
+  assert.equal(barOnly.fileStem, "Unlisted Lesson");
+
+  assert.equal(LessonTitle.resolveNowPlaying(posts, { barText: "", audioDuration: null }), null);
+
   const panel = fs.readFileSync(path.join(__dirname, "../extension/sidepanel.html"), "utf8");
   const popup = fs.readFileSync(path.join(__dirname, "../extension/popup.html"), "utf8");
-  assert.equal(panel.includes("<select"), false);
-  assert.equal(popup.includes("<select"), false);
-  assert.match(panel, /id="audio-pick-options"/);
-  assert.match(popup, /id="audio-pick-options"/);
-  const list = css.match(/\.audio-list ul \{[^}]+\}/);
-  assert.ok(list, "missing in-panel audio list rule");
-  assert.match(list[0], /max-height:\s*240px/);
-  assert.match(list[0], /overflow-x:\s*hidden/);
-  assert.match(list[0], /overflow-y:\s*auto/);
-  assert.match(list[0], /width:\s*100%/);
-});
-
-test("mounted lessons accumulate by message id while the panel stays on a channel", () => {
-  const { mergeAudioCatalog } = require("../extension/audio-catalog.js");
-  const context = { tabId: 7, channel: "daily-lessons" };
-  const first = mergeAudioCatalog(null, [
-    { id: "post-c", label: "C", scrollTop: 1400, playing: false },
-    { id: "post-d", label: "D", scrollTop: 1520, playing: true },
-  ], context);
-  assert.deepEqual(first.items.map((item) => item.id), ["post-c", "post-d"]);
-  assert.equal(first.items.length, 2);
-
-  const older = mergeAudioCatalog(first, [
-    { id: "post-a", label: "A", scrollTop: 200, playing: false },
-    { id: "post-b", label: "B", scrollTop: 320, playing: true },
-  ], context);
-  assert.deepEqual(older.items.map((item) => item.id), ["post-a", "post-b", "post-c", "post-d"]);
-  assert.equal(older.items.find((item) => item.id === "post-c").mounted, false);
-  assert.equal(older.items.find((item) => item.id === "post-c").playing, false);
-  assert.equal(older.items.find((item) => item.id === "post-b").playing, true);
-
-  const duplicate = mergeAudioCatalog(older, [
-    { id: "post-b", label: "B", scrollTop: 320, playing: true },
-  ], context);
-  assert.equal(duplicate.items.filter((item) => item.id === "post-b").length, 1);
-  assert.equal(duplicate.items.length, 4);
-
-  const otherChannel = mergeAudioCatalog(duplicate, [
-    { id: "post-z", label: "Z", scrollTop: 10, playing: false },
-  ], { tabId: 7, channel: "wins" });
-  assert.deepEqual(otherChannel.items.map((item) => item.id), ["post-z"]);
-});
-
-test("virtual rows remember the offset used to scroll a lesson back", () => {
-  const { posts } = postsFrom(fixture("speaker-tags.html"));
-  assert.equal(byId(posts, "post-certainty").scrollTop, 0);
-  assert.equal(byId(posts, "post-truth").scrollTop, 120);
-  assert.equal(byId(posts, "post-aikido").scrollTop, 240);
+  assert.equal(panel.includes("audio-pick"), false);
+  assert.equal(popup.includes("audio-pick"), false);
+  assert.equal(panel.includes("Which audio"), false);
+  assert.match(panel, /id="now-playing"/);
+  assert.match(popup, /id="now-playing"/);
+  assert.match(panel, /Play a lesson to capture it/);
 });
 
 function argsHead(logged) {

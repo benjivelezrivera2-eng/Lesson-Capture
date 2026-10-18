@@ -14,13 +14,7 @@
       <button type="button" id="mode-video" class="mode-btn is-active" data-mode="video" aria-pressed="true">Video</button>
     </div>
     <p id="status">Checking local processor…</p>
-    <div id="audio-pick-wrap" class="audio-pick" hidden>
-      <span>Which audio</span>
-      <div id="audio-pick" class="audio-list">
-        <button type="button" id="audio-pick-current" aria-haspopup="listbox" aria-expanded="false"></button>
-        <ul id="audio-pick-options" role="listbox" hidden></ul>
-      </div>
-    </div>
+    <p id="now-playing" class="now-playing" hidden>Play a lesson to capture it</p>
     <div id="running" hidden>
       <div id="progress" class="progress-card">
         <p id="progress-title"></p>
@@ -43,7 +37,6 @@
       <ul id="history" hidden></ul>
       <button type="button" id="clear-history" hidden>Clear history</button>
     </section>
-    <script src="audio-catalog.js"></script>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
