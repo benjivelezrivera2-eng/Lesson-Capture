@@ -5,6 +5,7 @@ const stopAll = document.querySelector("#stop-all");
 const summary = document.querySelector("#summary");
 const running = document.querySelector("#running");
 const progressTitle = document.querySelector("#progress-title");
+const bar = document.querySelector("#bar");
 const fill = document.querySelector("#fill");
 const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
@@ -125,13 +126,18 @@ function detailFor(source) {
 }
 
 function setBar(percent, waiting) {
-  if (waiting || percent == null) {
-    fill.style.width = "15%";
-    fill.style.opacity = "0.55";
+  const value = Number(percent);
+  const known = !waiting && Number.isFinite(value);
+  if (!known) {
+    fill.style.width = "0%";
+    fill.style.opacity = "1";
+    bar.removeAttribute("aria-valuenow");
     return;
   }
-  fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+  const clamped = Math.max(0, Math.min(100, value));
+  fill.style.width = `${clamped}%`;
   fill.style.opacity = "1";
+  bar.setAttribute("aria-valuenow", String(Math.round(clamped)));
 }
 
 function setStatus(message, kind) {
