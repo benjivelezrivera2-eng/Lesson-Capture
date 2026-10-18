@@ -13,6 +13,8 @@
 !/extension/content.js
 !/extension/lesson-title.js
 !/extension/manifest.json
+!/extension/page-controls.js
+!/extension/page-ui.js
 !/extension/popup.css
 !/extension/popup.html
 !/extension/popup.js

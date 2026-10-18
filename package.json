@@ -2,7 +2,7 @@
   "name": "lesson-capture",
   "private": true,
   "scripts": {
-    "test": "node --test test/lesson-title.test.js"
+    "test": "node --test test/lesson-title.test.js test/page-ui.test.mjs"
   },
   "devDependencies": {
     "linkedom": "^0.18.13"

@@ -1,3 +1,5 @@
+import { classifyGestureProbe, classifySidePanelProbe, embeddedBrowserHint, PAGE_UI_STORAGE_KEY, pageControlsVisible } from "./page-ui.js";
+
 const COURSE_HOST = "app.jointherealworld.com";
 const LOCAL_RECEIVER = "http://127.0.0.1:8766";
 // Five is a practical batch size: it removes babysitting while avoiding the
@@ -1591,6 +1593,14 @@ chrome.debugger.onDetach.addListener(({ tabId }) => { downloadProbes.delete(tabI
 chrome.tabs.onRemoved.addListener((tabId) => { downloadProbes.delete(tabId); finalizeCapture(tabId); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "LESSON_PAGE_UI_CONFIRM") {
+    confirmSidePanelFromGesture(message, sender, sendResponse);
+    return true;
+  }
+  if (message?.type === "LESSON_PAGE_UI_QUERY") {
+    respondPageUi(message, sender).then(sendResponse);
+    return true;
+  }
   if (message.type === "LESSON_CAPTURE_START") {
     startBackgroundCapture(message.tabId).then(sendResponse).catch((error) => sendResponse({ error: error.message })); return true;
   }
@@ -1680,15 +1690,167 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true })?.catch(() => {});
   pumpDirectDownloadQueue().catch(() => {});
 });
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true })?.catch(() => {});
   chrome.alarms.create("lesson-direct-download-queue", { periodInMinutes: 1 });
   pumpDirectDownloadQueue().catch(() => {});
 });
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true })?.catch(() => {});
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "lesson-direct-download-queue") pumpDirectDownloadQueue().catch(() => {});
 });
+
+// Page-control fallback. Desktop Chrome rejects an unprompted sidePanel.open()
+// with a user-gesture error, so the lesson page stays unchanged. A missing API,
+// a timeout, any other error, or an open that creates no side panel is unusable
+// and the content script mounts Capture / Stop.
+let sidePanelProbe = "unknown";
+let sidePanelProbeTask = null;
+
+function browserUserAgent() {
+  const brands = navigator.userAgentData?.brands?.map((brand) => brand.brand).join(" ") || "";
+  return `${navigator.userAgent || ""} ${brands}`;
+}
+
+async function probeSidePanelOnce() {
+  if (embeddedBrowserHint(browserUserAgent())) {
+    sidePanelProbe = "unusable";
+    return sidePanelProbe;
+  }
+  const api = chrome.sidePanel;
+  const apiPresent = Boolean(api && typeof api.open === "function");
+  if (!apiPresent) {
+    sidePanelProbe = "unusable";
+    return sidePanelProbe;
+  }
+  let windowId = null;
+  try {
+    const windows = await chrome.windows.getAll({ windowTypes: ["normal"] });
+    windowId = windows[0]?.id ?? null;
+    if (!windowId) {
+      const all = await chrome.windows.getAll();
+      if (all.length && all.every((item) => item.type !== "normal")) {
+        sidePanelProbe = "unusable";
+        return sidePanelProbe;
+      }
+      sidePanelProbe = "unknown";
+      sidePanelProbeTask = null;
+      return sidePanelProbe;
+    }
+  } catch {
+    sidePanelProbe = "unusable";
+    return sidePanelProbe;
+  }
+  let opened;
+  try {
+    opened = api.open({ windowId });
+  } catch (err) {
+    sidePanelProbe = classifySidePanelProbe({
+      apiPresent: true, error: String(err?.message || err), resolved: false, contextCount: 0, timedOut: false,
+    });
+    return sidePanelProbe;
+  }
+  const outcome = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timedOut: true }), 700);
+    opened.then(() => {
+      clearTimeout(timer);
+      resolve({ resolved: true });
+    }).catch((err) => {
+      clearTimeout(timer);
+      resolve({ error: String(err?.message || err) });
+    });
+  });
+  const error = outcome.error || "";
+  const resolved = Boolean(outcome.resolved);
+  const timedOut = Boolean(outcome.timedOut);
+  let contextCount = 0;
+  if (resolved) {
+    try {
+      contextCount = (await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] })).length;
+    } catch { contextCount = 0; }
+    if (contextCount) api.close?.({ windowId }).catch(() => {});
+  }
+  sidePanelProbe = classifySidePanelProbe({ apiPresent, error, resolved, contextCount, timedOut });
+  return sidePanelProbe;
+}
+
+function runUngesturedProbe() {
+  if (!sidePanelProbeTask) sidePanelProbeTask = probeSidePanelOnce();
+  return sidePanelProbeTask;
+}
+
+async function respondPageUi(message, sender) {
+  try { await runUngesturedProbe(); } catch { /* fail closed: leave the last probe */ }
+  const stored = await chrome.storage.local.get({ [PAGE_UI_STORAGE_KEY]: "auto" });
+  const show = pageControlsVisible({
+    extensionOverride: stored[PAGE_UI_STORAGE_KEY],
+    pageOverride: message?.pageOverride,
+    probe: sidePanelProbe,
+  });
+  return { show, probe: sidePanelProbe, tabId: sender.tab?.id ?? null };
+}
+
+function markPageUiUnusable(tabId) {
+  sidePanelProbe = "unusable";
+  if (!tabId) return;
+  chrome.tabs.sendMessage(tabId, { type: "LESSON_PAGE_UI_SHOW", tabId }).catch(() => {});
+}
+
+// Called from a content-script gesture. open({}) is synchronous so the gesture
+// still applies, and the empty options cannot open the desktop side panel.
+function confirmSidePanelFromGesture(message, sender, sendResponse) {
+  const reply = (probe) => {
+    if (probe === "usable" || probe === "unusable") sidePanelProbe = probe;
+    respondPageUi(message, sender).then(sendResponse);
+  };
+  const api = chrome.sidePanel;
+  if (!api || typeof api.open !== "function") {
+    reply("unusable");
+    return;
+  }
+  let settled = false;
+  const finish = (probe) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    reply(probe);
+  };
+  const timer = setTimeout(() => finish(classifyGestureProbe("", { timedOut: true })), 700);
+  let pending;
+  try {
+    pending = api.open({});
+  } catch (error) {
+    finish(classifyGestureProbe(error?.message || error));
+    return;
+  }
+  pending.then(async () => {
+    let contextCount = 0;
+    try {
+      contextCount = (await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] })).length;
+    } catch { contextCount = 0; }
+    if (contextCount) {
+      const windows = await chrome.windows.getAll().catch(() => []);
+      for (const item of windows) api.close?.({ windowId: item.id }).catch(() => {});
+    }
+    finish(classifyGestureProbe("", { resolved: true, contextCount }));
+  }).catch((error) => finish(classifyGestureProbe(error?.message || error)));
+}
+
+chrome.action.onClicked.addListener((tab) => {
+  // With openPanelOnActionClick, desktop Chrome does not fire this. A browser
+  // that cannot show the panel delivers the click here instead.
+  const open = chrome.sidePanel?.open;
+  if (typeof open !== "function" || !tab?.windowId) {
+    markPageUiUnusable(tab?.id);
+    return;
+  }
+  open({ windowId: tab.windowId }).then(async () => {
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] }).catch(() => []);
+    if (!contexts.length) markPageUiUnusable(tab.id);
+  }).catch(() => markPageUiUnusable(tab.id));
+});
+
+runUngesturedProbe().catch(() => {});
