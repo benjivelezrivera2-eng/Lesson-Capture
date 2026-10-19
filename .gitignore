@@ -11,7 +11,9 @@
 /extension/*
 !/extension/background.js
 !/extension/content.js
+!/extension/frame-video.mjs
 !/extension/lesson-title.js
+!/extension/title-above-player.js
 !/extension/manifest.json
 !/extension/popup.css
 !/extension/popup.html

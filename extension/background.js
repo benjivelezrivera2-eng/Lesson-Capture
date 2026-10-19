@@ -1,3 +1,5 @@
+import { pickDisplayedVideo } from "./frame-video.mjs";
+
 const COURSE_HOST = "app.jointherealworld.com";
 const LOCAL_RECEIVER = "http://127.0.0.1:8766";
 // Five is a practical batch size: it removes babysitting while avoiding the
@@ -312,69 +314,110 @@ async function currentVideoForTab(tabId, required = false) {
   };
 }
 
-// Inspect only the clicked tab. Signed URLs are passed directly to the
-// collector and never written to the extension's persisted queue.
-async function currentOtherSiteVideo(tabId, required = false) {
-  let video;
+// Runs in each frame of the clicked tab. Must stay self-contained: Chrome
+// serializes this function into the page, so it cannot call extension code.
+function findDisplayedVideoInFrame() {
   try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const all = [];
-        const visit = (root) => {
-          for (const element of root.querySelectorAll("*")) {
-            if (element.matches("video, mux-video, mux-player")) all.push(element);
-            if (element.shadowRoot) visit(element.shadowRoot);
-          }
-        };
-        visit(document);
-        const title = (document.querySelector("mux-player[title]")?.getAttribute("title") ||
-          document.querySelector("h1")?.textContent ||
-          document.querySelector("[data-testid*='lesson-title']")?.textContent ||
-          document.title || "video").trim().slice(0, 140);
-        const ogTitle = (document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "").trim();
-        const siteName = (document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "").trim();
-        const h1 = (document.querySelector("h1")?.textContent || "").trim();
-        const channel = (
-          document.querySelector('[data-testid*="channel" i]')?.textContent ||
-          document.querySelector('nav [aria-current="page"]')?.textContent ||
-          ""
-        ).trim().replace(/^#/, "").slice(0, 80);
-        const site = location.hostname.replace(/^www\./, "");
-        const supported = (value) => {
-          try {
-            const url = new URL(value, location.href);
-            return url.protocol === "https:" && /\.(mp4|m3u8)$/i.test(url.pathname) ? url.href : null;
-          } catch { return null; }
-        };
-        const found = all.map((element) => {
-          const native = element.tagName === "VIDEO" ? element : element.shadowRoot?.querySelector("video");
-          const values = [element.getAttribute("src"),
-            ...[...element.querySelectorAll("source")].map((source) => source.src),
-            native?.getAttribute("src"), native?.currentSrc];
-          const rect = element.getBoundingClientRect();
-          const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
-          const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
-          const duration = Number.isFinite(native?.duration) && native.duration > 0 ? native.duration : null;
-          return { url: values.map(supported).find(Boolean), protected: Boolean(native?.mediaKeys),
-            visible: width * height, playing: Boolean(native && !native.paused), duration };
-        }).filter((item) => item.url || item.protected)
-          .sort((a, b) => b.visible - a.visible || Number(b.playing) - Number(a.playing));
-        return { mediaUrl: found[0]?.url || null, protected: found[0]?.protected || false,
-          title, site, duration: found[0]?.duration ?? null,
-          naming: {
-            tabTitle: (document.title || "").trim(),
-            ogTitle, h1, siteName, channel,
-            lessonTitle: title,
-            site,
-          } };
-      },
+    const all = [];
+    const visit = (root) => {
+      for (const element of root.querySelectorAll("*")) {
+        if (element.matches("video, mux-video, mux-player")) all.push(element);
+        if (element.shadowRoot) visit(element.shadowRoot);
+      }
+    };
+    visit(document);
+    const title = (document.querySelector("mux-player[title]")?.getAttribute("title") ||
+      document.querySelector("h1")?.textContent ||
+      document.querySelector("[data-testid*='lesson-title']")?.textContent ||
+      document.title || "video").trim().slice(0, 140);
+    const ogTitle = (document.querySelector('meta[property="og:title"]')?.getAttribute("content") || "").trim();
+    const siteName = (document.querySelector('meta[property="og:site_name"]')?.getAttribute("content") || "").trim();
+    const h1 = (document.querySelector("h1")?.textContent || "").trim();
+    const channel = (
+      document.querySelector('[data-testid*="channel" i]')?.textContent ||
+      document.querySelector('nav [aria-current="page"]')?.textContent ||
+      ""
+    ).trim().replace(/^#/, "").slice(0, 80);
+    const site = location.hostname.replace(/^www\./, "");
+    const supported = (value) => {
+      try {
+        const url = new URL(value, location.href);
+        if (url.protocol !== "https:" || url.href.length > 16384) return null;
+        return /\.(mp4|m3u8)$/i.test(url.pathname) ? url.href : null;
+      } catch { return null; }
+    };
+    const players = all.map((element) => {
+      const native = element.tagName === "VIDEO" ? element : element.shadowRoot?.querySelector("video");
+      const values = [element.getAttribute("src"),
+        ...[...element.querySelectorAll("source")].map((source) => source.src),
+        native?.getAttribute("src"), native?.currentSrc];
+      const rect = (native || element).getBoundingClientRect();
+      const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
+      const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+      const duration = Number.isFinite(native?.duration) && native.duration > 0 ? native.duration : null;
+      return { url: values.map(supported).find(Boolean) || null, protected: Boolean(native?.mediaKeys),
+        visible: width * height, playing: Boolean(native && !native.paused), duration };
     });
-    video = result;
+    const ranked = players
+      .filter((item) => item.url || item.protected || item.visible > 0 || item.playing)
+      .sort((a, b) => b.visible - a.visible || Number(b.playing) - Number(a.playing));
+    const main = ranked[0] || null;
+    let resourceUrl = null;
+    if (main && !main.url && !main.protected) {
+      const entries = performance.getEntriesByType("resource")
+        .map((entry) => ({ href: supported(entry.name), size: entry.transferSize || entry.decodedBodySize || 0 }))
+        .filter((entry) => entry.href);
+      const playlist = entries.find((entry) => /\.m3u8$/i.test(new URL(entry.href).pathname));
+      const files = entries
+        .filter((entry) => /\.mp4$/i.test(new URL(entry.href).pathname) && !/\/init\.mp4$/i.test(new URL(entry.href).pathname))
+        .sort((a, b) => b.size - a.size);
+      resourceUrl = playlist?.href || files[0]?.href || null;
+    }
+    let isTop = false;
+    try { isTop = window.top === window; } catch { isTop = false; }
+    return {
+      isTop,
+      mediaUrl: main && !main.protected ? (main.url || null) : null,
+      resourceUrl: main?.protected ? null : resourceUrl,
+      protected: Boolean(main?.protected),
+      visible: main?.visible || 0,
+      playing: Boolean(main?.playing),
+      duration: main?.duration ?? null,
+      title,
+      site,
+      naming: {
+        tabTitle: (document.title || "").trim(),
+        ogTitle, h1, siteName, channel,
+        lessonTitle: title,
+        site,
+      },
+    };
   } catch {
-    if (required) throw new Error("This page's video could not be inspected. Open the video page and click the extension again.");
     return null;
   }
+}
+
+// Inspect the clicked tab and every frame in it. Signed URLs are passed
+// directly to the collector and never written to the extension's persisted queue.
+async function currentOtherSiteVideo(tabId, required = false) {
+  let frames;
+  try {
+    frames = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: findDisplayedVideoInFrame,
+    });
+  } catch {
+    try {
+      frames = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: findDisplayedVideoInFrame,
+      });
+    } catch {
+      if (required) throw new Error("This page's video could not be inspected. Open the video page and click the extension again.");
+      return null;
+    }
+  }
+  const video = pickDisplayedVideo(frames.map((frame) => frame?.result));
   if (video?.protected && required) throw new Error("Unsupported protected player: direct download is unavailable.");
   if (!video?.mediaUrl && required) {
     throw new Error(video?.protected ? "Unsupported protected player: no direct MP4 or unprotected HLS stream is available." :
@@ -516,6 +559,66 @@ function scrapePageNamingFields() {
     /* ignore malformed URLs */
   }
 
+  if (!sidebarTitle && globalThis.TitleAbovePlayer) try {
+    const header = text(document.querySelector("h1")?.textContent) || text(document.title);
+    const isCurrent = (el) => {
+      if (!el) return false;
+      const aria = String(el.getAttribute("aria-current") || "").toLowerCase();
+      if (aria && aria !== "false") return true;
+      if (String(el.getAttribute("aria-selected") || "").toLowerCase() === "true") return true;
+      const blob = `${el.className || ""} ${el.id || ""} ${el.getAttribute("data-state") || ""} ${el.getAttribute("data-selected") || ""}`;
+      return /\b(active|selected|current|is-active|is-selected)\b/i.test(blob);
+    };
+    const paint = (el) => {
+      try {
+        for (const node of [el, el.parentElement]) {
+          if (!node) continue;
+          const color = getComputedStyle(node).backgroundColor || "";
+          if (color && color !== "transparent" && !/^rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)$/.test(color)) return color;
+        }
+      } catch { /* ignore */ }
+      return "";
+    };
+    const seenList = new Set();
+    const selected = [];
+    for (const list of document.querySelectorAll("nav, aside, ol, ul, div, [role='navigation'], [role='list']")) {
+      if (seenList.has(list)) continue;
+      seenList.add(list);
+      const box = list.getBoundingClientRect();
+      const onSide = box.width > 80 && box.width < innerWidth * 0.42 &&
+        (box.right < innerWidth * 0.45 || box.left > innerWidth * 0.55);
+      if (!onSide) continue;
+      const rows = [...list.querySelectorAll("a, button, li, [role='listitem'], [role='option'], [role='link']")]
+        .map((el) => {
+          if (el.querySelectorAll("a, button").length > 3) return null;
+          const label = cleanLessonLabel(el.innerText || el.textContent);
+          if (label.length < 3 || label.length > 120) return null;
+          return { el, text: label, current: isCurrent(el) || isCurrent(el.parentElement) };
+        })
+        .filter(Boolean);
+      const unique = [];
+      const seenLabel = new Set();
+      for (const row of rows) {
+        if (seenLabel.has(row.text)) continue;
+        seenLabel.add(row.text);
+        unique.push(row);
+      }
+      if (unique.length < 3) continue;
+      if (!unique.some((row) => row.current)) {
+        const colored = unique.map((row) => ({ row, color: paint(row.el) })).filter((item) => item.color);
+        const counts = new Map();
+        for (const item of colored) counts.set(item.color, (counts.get(item.color) || 0) + 1);
+        const lone = colored.filter((item) => counts.get(item.color) === 1);
+        if (lone.length === 1) lone[0].row.current = true;
+      }
+      for (const row of unique) {
+        if (row.current) selected.push({ text: row.text, current: true, groupSize: unique.length });
+      }
+    }
+    const picked = globalThis.TitleAbovePlayer.pickSelectedLesson(selected, header);
+    if (picked) sidebarTitle = picked.slice(0, 140);
+  } catch { /* a missing lesson list falls through to the heading */ }
+
   if (!sidebarTitle) {
     const crumbs = [...document.querySelectorAll(
       "nav[aria-label*='breadcrumb' i] li, nav[aria-label*='breadcrumb' i] a, nav[aria-label*='breadcrumb' i] span, [class*='breadcrumb' i] li, [class*='breadcrumb' i] a"
@@ -525,6 +628,32 @@ function scrapePageNamingFields() {
         !/^(home|learning|courses?)$/i.test(value));
     if (crumbs.length) sidebarTitle = crumbs[crumbs.length - 1].slice(0, 140);
   }
+
+  if (!sidebarTitle && globalThis.TitleAbovePlayer) try {
+    const boxes = [...document.querySelectorAll("video, iframe")].map((node) => {
+      const rect = node.getBoundingClientRect();
+      const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
+      const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+      return { top: rect.top, left: rect.left, right: rect.right, area: width * height };
+    }).filter((box) => box.area > 10000)
+      .sort((a, b) => b.area - a.area);
+    const player = boxes[0];
+    if (player) {
+      const header = text(document.querySelector("h1")?.textContent) || text(document.title);
+      const seen = new Set();
+      const candidates = [];
+      for (const el of document.querySelectorAll("h1, h2, h3, h4, a, span, p, li, div")) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 40 || rect.height < 8 || rect.height > 72) continue;
+        if (rect.right < player.left + 8 || rect.left > player.right - 8) continue;
+        const label = cleanLessonLabel(el.innerText || el.textContent);
+        if (label.length < 3 || label.length > 140 || seen.has(label)) continue;
+        seen.add(label);
+        candidates.push({ text: label, gap: player.top - rect.bottom, left: rect.left });
+      }
+      sidebarTitle = globalThis.TitleAbovePlayer.pickTitleAbovePlayer(candidates, header).slice(0, 140);
+    }
+  } catch { /* the header title remains the fallback */ }
 
   const player = [...document.querySelectorAll("video")].reverse()
     .find((node) => /^[a-f0-9]{32}$/i.test(node.id));
@@ -1135,6 +1264,10 @@ async function pumpDirectDownloadQueue() {
 
 async function readPageNaming(tabId) {
   try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["title-above-player.js"],
+    }).catch(() => {});
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       func: scrapePageNamingFields,
