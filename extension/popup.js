@@ -5,6 +5,7 @@ const stopAll = document.querySelector("#stop-all");
 const summary = document.querySelector("#summary");
 const running = document.querySelector("#running");
 const progressTitle = document.querySelector("#progress-title");
+const bar = document.querySelector("#bar");
 const fill = document.querySelector("#fill");
 const progressText = document.querySelector("#progress-text");
 const themeButton = document.querySelector("#theme");
@@ -125,13 +126,35 @@ function detailFor(source) {
 }
 
 function setBar(percent, waiting) {
-  if (waiting || percent == null) {
-    fill.style.width = "15%";
-    fill.style.opacity = "0.55";
+  const value = Number(percent);
+  const known = !waiting && Number.isFinite(value);
+  if (!known) {
+    fill.style.width = "0%";
+    fill.style.opacity = "1";
+    bar.removeAttribute("aria-valuenow");
     return;
   }
-  fill.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+  const clamped = Math.max(0, Math.min(100, value));
+  fill.style.width = `${clamped}%`;
   fill.style.opacity = "1";
+  bar.setAttribute("aria-valuenow", String(Math.round(clamped)));
+}
+
+function setStatus(message, kind) {
+  const nextKind = kind === "saved" || kind === "failed" ? kind : "ready";
+  if (status.dataset.state !== nextKind) {
+    status.dataset.state = nextKind;
+    status.classList.toggle("is-saved", nextKind === "saved");
+    status.classList.toggle("is-failed", nextKind === "failed");
+    if (nextKind === "failed") {
+      status.setAttribute("role", "alert");
+      status.setAttribute("aria-live", "assertive");
+    } else {
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+    }
+  }
+  if (status.textContent !== message) status.textContent = message;
 }
 
 function formatPanelError(error) {
@@ -139,7 +162,7 @@ function formatPanelError(error) {
   if (text.startsWith("Audio not loaded yet")) return text;
   if (text.startsWith("Play a lesson to capture it")) return text;
   if (text.startsWith("That post isn't loaded anymore")) return text;
-  return `Download failed or unsupported: ${text}`;
+  return `Download failed. ${text}`;
 }
 
 function renderNowPlaying(nowPlaying) {
@@ -218,7 +241,7 @@ async function writeHistory(done) {
 function renderHistory(items) {
   const modeName = captureMode === "audio" ? "audio" : "video";
   historyLabel.textContent = captureMode === "audio" ? "Audio" : "Video";
-  historyCount.textContent = String(items.length);
+  historyCount.textContent = `${items.length} saved`;
   historyList.replaceChildren();
   const empty = items.length === 0;
   historyEmpty.hidden = !empty;
@@ -244,7 +267,7 @@ function renderHistory(items) {
       const result = await chrome.runtime.sendMessage({
         type: "LESSON_REVEAL_DOWNLOAD", id: item.id, outputFile: item.outputFile,
       });
-      if (result?.error) status.textContent = `Could not open folder: ${result.error}`;
+      if (result?.error) setStatus(`Could not open folder: ${result.error}`, "failed");
     });
     row.append(copy, open);
     historyList.append(row);
@@ -267,22 +290,22 @@ async function refresh() {
   start.textContent = startLabel(state);
   const title = readableTitle(state.displayTitle || state.title);
   if (state.error) {
-    status.textContent = formatPanelError(state.error);
+    setStatus(formatPanelError(state.error), "failed");
   } else if (state.active) {
-    status.textContent = captureMode === "audio"
+    setStatus(captureMode === "audio"
       ? "Downloading this audio. You can keep using the tab while it finishes."
-      : "Downloading this displayed video. You can click Next and capture the next one.";
+      : "Downloading this displayed video. You can click Next and capture the next one.", "ready");
   } else if (state.status === "complete") {
     const note = state.note && !/[\\/]/.test(state.note) ? ` ${state.note}` : "";
-    status.textContent = `Saved ${title}.${note}`;
+    setStatus(`Saved ${title}.${note}`, "saved");
   } else if (state.status === "cancelled") {
-    status.textContent = captureMode === "audio"
+    setStatus(captureMode === "audio"
       ? "Stopped. Capture again when you want this audio."
-      : "Stopped. Capture again when you want this video.";
+      : "Stopped. Capture again when you want this video.", "ready");
   } else {
-    status.textContent = captureMode === "audio"
+    setStatus(captureMode === "audio"
       ? "Ready. Capture saves the lesson that is playing."
-      : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.";
+      : "Ready. This captures the displayed video. Click Next, then Capture this video for each following step.", "ready");
   }
 
   const runningJobs = jobs.filter((job) => job.status === "downloading");
@@ -315,12 +338,12 @@ start.addEventListener("click", async () => {
     : { type: "LESSON_DIRECT_DOWNLOAD_START", tabId: tab.id };
   const result = await chrome.runtime.sendMessage(payload);
   if (result.error) {
-    status.textContent = formatPanelError(result.error);
+    setStatus(formatPanelError(result.error), "failed");
     return;
   }
-  status.textContent = captureMode === "audio"
+  setStatus(captureMode === "audio"
     ? "Audio queued. You can keep using the tab while it downloads."
-    : "Video queued. You can keep using the tab while it downloads.";
+    : "Video queued. You can keep using the tab while it downloads.", "ready");
   await refresh();
 });
 
@@ -335,9 +358,9 @@ stop?.addEventListener("click", async () => {
     const fallback = await chrome.runtime.sendMessage({
       type: "LESSON_DIRECT_DOWNLOAD_CANCEL", id: shownJobId,
     });
-    status.textContent = fallback?.error || "Stopped this download.";
+    setStatus(fallback?.error ? formatPanelError(fallback.error) : "Stopped this download.", fallback?.error ? "failed" : "ready");
   } else {
-    status.textContent = result.error || "Stopped this download.";
+    setStatus(result.error ? formatPanelError(result.error) : "Stopped this download.", result.error ? "failed" : "ready");
   }
   await refresh();
 });
@@ -345,7 +368,7 @@ stop?.addEventListener("click", async () => {
 stopAll?.addEventListener("click", async () => {
   stopAll.disabled = true;
   const result = await chrome.runtime.sendMessage({ type: "LESSON_DIRECT_DOWNLOAD_CANCEL_ALL" });
-  status.textContent = result.error || "Stopped all downloads.";
+  setStatus(result.error ? formatPanelError(result.error) : "Stopped all downloads.", result.error ? "failed" : "ready");
   await refresh();
 });
 

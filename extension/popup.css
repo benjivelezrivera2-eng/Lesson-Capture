@@ -150,6 +150,13 @@ p { margin: 0 0 10px; }
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
+#status.is-saved {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+#status.is-failed {
+  border-color: var(--bad);
+}
 
 #running { margin: 0 0 12px; }
 #running[hidden] { display: none; }
