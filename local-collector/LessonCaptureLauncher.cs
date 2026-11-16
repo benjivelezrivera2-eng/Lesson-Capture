@@ -11,6 +11,7 @@ public static class LessonCaptureLauncher
 {
     private const string CollectorFileName = "LessonCaptureCollector.exe";
     private const string HealthUrl = "http://127.0.0.1:8766/health";
+    private static readonly bool RunningOnWindows = IsWindowsOs();
 
     public static void Main()
     {
@@ -34,17 +35,31 @@ public static class LessonCaptureLauncher
                 error = "The local collector executable is missing.";
                 return false;
             }
-            Process.Start(new ProcessStartInfo
+            if (RunningOnWindows)
             {
-                FileName = collectorPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = collectorPath,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+            }
+            else
+            {
+                // Linux builds are Mono assemblies; start them through mono.
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "mono",
+                    Arguments = "\"" + collectorPath + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
         }
         catch (Exception ex)
         {
-            error = "Windows could not start the local collector: " + ex.Message;
+            error = (RunningOnWindows ? "Windows" : "Linux") + " could not start the local collector: " + ex.Message;
             return false;
         }
 
@@ -109,5 +124,14 @@ public static class LessonCaptureLauncher
     private static string EscapeJson(string value)
     {
         return (value ?? "Unknown local error.").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", " ");
+    }
+
+    private static bool IsWindowsOs()
+    {
+        var platform = Environment.OSVersion.Platform;
+        return platform == PlatformID.Win32NT
+            || platform == PlatformID.Win32Windows
+            || platform == PlatformID.Win32S
+            || platform == PlatformID.WinCE;
     }
 }
