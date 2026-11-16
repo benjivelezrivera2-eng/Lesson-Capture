@@ -1,12 +1,21 @@
 /*
 !/.gitignore
 !/README.md
+!/AGENTS.md
+!/GITHUB_ISSUES_GUIDE.md
 !/package.json
 !/package-lock.json
 !/extension/
 !/local-collector/
 !/test/
 !/test/**
+!/docs/
+!/docs/**
+!/implementation-plans/
+!/implementation-plans/**
+!/.cursor/
+!/.cursor/skills/
+!/.cursor/skills/**
 
 /extension/*
 !/extension/background.js
@@ -22,6 +31,8 @@
 
 /local-collector/*
 !/local-collector/build.ps1
+!/local-collector/build.sh
 !/local-collector/install-collector.ps1
+!/local-collector/install-collector.sh
 !/local-collector/LessonCaptureCollector.cs
 !/local-collector/LessonCaptureLauncher.cs

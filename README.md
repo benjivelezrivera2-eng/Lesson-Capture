@@ -15,6 +15,16 @@ The local collector converts supported video streams to MP4 and verifies a video
 2. Open `chrome://extensions` and reload **Local Lesson Capture Helper** after updating the extension files.
 3. Open a video or audio page, click the extension icon, pick **Video** or **Audio**, then **Capture this video** / **Capture this audio**. While a download runs, the panel shows a progress card. Audio and Video each keep their own saved list. Use the folder icon on a row to open that file in Explorer. **Clear history** only empties that list. You can keep using the tab while the local download runs.
 
+### Linux helper (AI agents)
+
+For Linux Chrome hosts (for example GrokBot), build and install with Mono instead of the Windows scripts:
+
+1. Install `mono-devel`, `mono`, and `ffmpeg` (provides `ffprobe`).
+2. Run `local-collector/build.sh`, then `local-collector/install-collector.sh`.
+3. Load the same `extension/` folder in Chrome/Chromium and capture as usual.
+
+Finished files go to `~/Videos/Lesson Captures` (or `$XDG_VIDEOS_DIR/Lesson Captures`). Agent-oriented notes: `AGENTS.md`, `.cursor/skills/lesson-capture/SKILL.md`, and `docs/ai-compatibility.md`.
+
 The extension can read the pages you open, including a player embedded in a frame, so Capture works on any site. It still uses that player's own MP4 or HLS URL. Its persistent job state contains the source page, a hash identifying the video, and the output path, never a signed media URL or token. The collector binds to `127.0.0.1` and does not upload captured media. Use it only for media you are authorized to save; do not redistribute course files.
 
 The sign-in entry starts the collector after Windows restarts. Chrome's native-messaging host also starts it on demand if sign-in startup has not run yet. The installer resolves the actual interactive Windows profile SID and refuses to register under a different account. Repository updates do not require stopping a running capture; rebuild and reinstall the helper only when changing its C# code.

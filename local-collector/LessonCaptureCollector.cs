@@ -26,22 +26,14 @@ public static class LessonCaptureCollector
     private static readonly ConcurrentDictionary<string, DownloadSession> Downloads = new ConcurrentDictionary<string, DownloadSession>();
     private static readonly object OutputNameLock = new object();
     private static readonly int Port = ResolvePort();
-    private static readonly string CaptureRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "BenjiLessonCapture", "cache");
+    private static readonly bool RunningOnWindows = IsWindowsOs();
+    private static readonly string CaptureRoot = ResolveCaptureRoot();
     // Keep finished videos in a normal local folder the user can reach. Raw
     // fragments stay in the private cache and are not the deliverable.
-    private static readonly string FinishedVideoRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
-        "Lesson Captures");
-    // Jellyfin installs a local ffmpeg binary on this computer. The collector
-    // uses it only to mux already-local audio/video fragments into an MP4.
-    private static readonly string FfmpegPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-        "Jellyfin", "Server", "ffmpeg.exe");
-    private static readonly string FfprobePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-        "Jellyfin", "Server", "ffprobe.exe");
+    private static readonly string FinishedVideoRoot = ResolveFinishedVideoRoot();
+    // Windows: Jellyfin's local ffmpeg. Linux: ffmpeg/ffprobe on PATH.
+    private static readonly string FfmpegPath = ResolveFfmpegPath();
+    private static readonly string FfprobePath = ResolveFfprobePath();
 
     private sealed class CaptureSession
     {
@@ -340,12 +332,27 @@ public static class LessonCaptureCollector
             Respond(context, HttpStatusCode.Forbidden, new { error = "file is outside Lesson Captures" });
             return;
         }
-        Process.Start(new ProcessStartInfo {
-            FileName = "explorer.exe",
-            Arguments = "/select," + Quote(full),
-            UseShellExecute = true
-        });
+        RevealInFileManager(full);
         Respond(context, HttpStatusCode.OK, new { ok = true, outputFile = full });
+    }
+
+    private static void RevealInFileManager(string fullPath)
+    {
+        if (RunningOnWindows)
+        {
+            Process.Start(new ProcessStartInfo {
+                FileName = "explorer.exe",
+                Arguments = "/select," + Quote(fullPath),
+                UseShellExecute = true
+            });
+            return;
+        }
+        // Linux agents: open the folder that holds the finished file.
+        Process.Start(new ProcessStartInfo {
+            FileName = "xdg-open",
+            Arguments = Quote(Path.GetDirectoryName(fullPath)),
+            UseShellExecute = false
+        });
     }
 
     private static void DownloadManifest(DownloadSession download, string mediaUrl, string referer)
@@ -1313,6 +1320,77 @@ public static class LessonCaptureCollector
         return int.TryParse(Environment.GetEnvironmentVariable("LESSON_CAPTURE_PORT"), out port) && port >= 1024 && port <= 65535
             ? port
             : 8766;
+    }
+
+    private static bool IsWindowsOs()
+    {
+        var platform = Environment.OSVersion.Platform;
+        return platform == PlatformID.Win32NT
+            || platform == PlatformID.Win32Windows
+            || platform == PlatformID.Win32S
+            || platform == PlatformID.WinCE;
+    }
+
+    private static string ResolveCaptureRoot()
+    {
+        if (RunningOnWindows)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "BenjiLessonCapture", "cache");
+        }
+        var cacheHome = Environment.GetEnvironmentVariable("XDG_CACHE_HOME");
+        if (string.IsNullOrWhiteSpace(cacheHome))
+            cacheHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), ".cache");
+        return Path.Combine(cacheHome, "BenjiLessonCapture", "cache");
+    }
+
+    private static string ResolveFinishedVideoRoot()
+    {
+        if (RunningOnWindows)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                "Lesson Captures");
+        }
+        var videos = Environment.GetEnvironmentVariable("XDG_VIDEOS_DIR");
+        if (string.IsNullOrWhiteSpace(videos))
+            videos = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), "Videos");
+        return Path.Combine(videos, "Lesson Captures");
+    }
+
+    private static string ResolveFfmpegPath()
+    {
+        if (RunningOnWindows)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Jellyfin", "Server", "ffmpeg.exe");
+        }
+        return FindOnPath("ffmpeg") ?? "ffmpeg";
+    }
+
+    private static string ResolveFfprobePath()
+    {
+        if (RunningOnWindows)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "Jellyfin", "Server", "ffprobe.exe");
+        }
+        return FindOnPath("ffprobe") ?? "ffprobe";
+    }
+
+    private static string FindOnPath(string fileName)
+    {
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathEnv.Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(dir.Trim(), fileName);
+            if (File.Exists(candidate)) return candidate;
+        }
+        var fallback = Path.Combine("/usr/bin", fileName);
+        return File.Exists(fallback) ? fallback : null;
     }
 
     private static string SafeName(string value)

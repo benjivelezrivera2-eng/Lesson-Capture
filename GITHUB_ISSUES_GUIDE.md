@@ -5,12 +5,15 @@ Repo: [benjivelezrivera2-eng/Lesson-Capture](https://github.com/benjivelezrivera
 Follow this on every task. Benji confirms the issue before any code is written.
 
 ## Prime rule
-No code until a GitHub Issue exists for the work. Plan the issue first, then build.
+No code on `main`. No code until a branch, a GitHub Issue, and a reviewed implementation plan exist for the work.
+
+Full sequence: **branch → issue → plan → Benji reviews plan → implement → Benji reviews result** (loop if needed). See `implementation-plans/IMPLEMENTATION_PLANS_GUIDE.md`.
 
 ## Before you start
-1. List open issues: `gh issue list`.
-2. Pick the issue this chat will work on, or draft a new one if none fits.
-3. Confirm that choice with Benji. Wait for a yes before writing code.
+1. Confirm you are not on `main`. Create a new branch if needed.
+2. List open issues: `gh issue list`.
+3. Pick the issue this chat will work on, or draft a new one if none fits.
+4. Confirm that choice with Benji. Then write the implementation plan and wait for plan approval before writing code.
 
 ## Issue format
 - **Title:** specific and clear.
